@@ -1,13 +1,20 @@
-import { App, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Modal, Notice, DataAdapter, FileSystemAdapter, TextComponent } from 'obsidian';
 import * as http from 'http';
+import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
+// @ts-ignore // uuid ライブラリが見つからない場合のエラーを無視
+import { v4 as uuidv4 } from 'uuid'; // 各サーバーエントリにユニークなIDを振るために使用 (要 npm install uuid)
 import { URL } from 'url';
 
+const MAX_LOG_ENTRIES = 300; // 保持するログの最大件数
+
 /**
- * プラグイン設定用インターフェース
+ * 個々のサーバー設定用インターフェース
  */
-interface LocalServerSettings {
+interface ServerEntrySettings {
+    id: string; // ユニークな識別子
+    name: string; // 設定画面表示用の名前
 	host: string;
 	port: number;
 	/** 公開するフォルダーの絶対パス */
@@ -18,173 +25,783 @@ interface LocalServerSettings {
 	whitelistFiles: string[];
 	/** 認証トークンを設定すると、各リクエストで "Authorization: Bearer <token>" ヘッダーが必要になります */
 	authToken: string;
+	/** HTTPS を有効にするか */
+	enableHttps: boolean;
+	/** SSL 証明書ファイル (.pem) のパス */
+	sslCertPath: string;
+	/** SSL 秘密鍵ファイル (.key または .pem) のパス */
+	sslKeyPath: string;
+}
+
+const DEFAULT_SERVER_ENTRY: ServerEntrySettings = {
+    id: '', // UUID will be assigned
+    name: 'New Server',
+    host: '127.0.0.1',
+    port: 3000,
+    serveDir: '',
+    enableWhitelist: false,
+    whitelistFiles: [],
+    authToken: '',
+    enableHttps: false,
+    sslCertPath: '',
+    sslKeyPath: '',
+};
+
+
+/**
+ * プラグイン全体の設定用インターフェース
+ */
+interface LocalServerPluginSettings {
+	serverEntries: ServerEntrySettings[]; // 複数のサーバー設定を保持する配列
 }
 
 /**
  * 初期設定値
  */
-const DEFAULT_SETTINGS: LocalServerSettings = {
-	host: '127.0.0.1',
-	port: 3000,
-	serveDir: '/path/to/your/folder', // ※環境に合わせて変更してください
-	enableWhitelist: false,
-	whitelistFiles: [],
-	authToken: '',
+const DEFAULT_SETTINGS: LocalServerPluginSettings = {
+	serverEntries: [], // 最初はサーバーエントリなし
 };
 
+// 起動中のサーバーインスタンスとそれに関連する情報を保持する構造
+interface RunningServerInfo {
+    server: http.Server | https.Server | null; // null の可能性も追加
+    entry: ServerEntrySettings; // 元の設定エントリへの参照
+    servedRealPath: string | null; // このエントリの解決済みパス
+    // *** Error 4 Correction ***
+    status: 'running' | 'error' | 'stopped'; // 'stopped' 状態を追加
+    // *** End Correction ***
+    errorMessage?: string; // エラーがある場合
+}
+
+
 export default class LocalServerPlugin extends Plugin {
-	settings: LocalServerSettings;
-	server: http.Server;
-	/** serveDir の実体パス（シンボリックリンクなどを解決済み） */
-	servedRealPath: string;
+	settings: LocalServerPluginSettings;
+	/** 起動中のサーバーインスタンスを ID に紐づけて管理 */
+	runningServers: Map<string, RunningServerInfo> = new Map();
+	/** 設定画面で表示中のファイルリスト（ホワイトリスト用） */
+	settingTabFileList: Map<string, string[]> = new Map(); // entryId -> files list
+
+	// *** Error 2 & 5: Property 'statusBarItemEl' / 'logMessages' does not exist on type 'LocalServerPlugin'. ***
+    // These properties ARE defined below. If the error persists, it's likely an environment issue.
+    // No code change here, assuming the declarations below are correct.
+    logMessages: { timestamp: Date, type: 'log' | 'warn' | 'error', message: string }[] = [];
+    statusBarItemEl: HTMLElement | null = null;
+    // *** End of Error 2 & 5 consideration ***
+
 
 	async onload() {
-		console.log('LocalServerPlugin loading...');
+		// uuidv4 が使用可能か確認 (ランタイムチェック)
+		// @ts-ignore
+		if (typeof uuidv4 === 'undefined') {
+            this.log('error', 'UUID library not found. Please install it using npm install uuid');
+            new Notice('Local Server: UUID library not found. Please install it to manage multiple servers.', 10000); // 長めの通知
+            // uuid がないとエントリ管理が困難になるため、ここで処理を中断することも検討
+            // return;
+        } else {
+             this.log('info', 'UUID library is available.');
+        }
+
+
+		this.log('info', 'LocalServerPlugin loading...');
 		await this.loadSettings();
 
-		// ホスト設定のチェック（127.0.0.1 または localhost 推奨）
-		if (this.settings.host !== '127.0.0.1' && this.settings.host !== 'localhost') {
-			console.warn(`Warning: ホストが ${this.settings.host} に設定されています。セキュリティ上、127.0.0.1 または localhost の使用を推奨します。`);
-		}
+        // 設定のマイグレーション（古い単一設定から新しい複数設定へ）
+        if (!Array.isArray(this.settings.serverEntries) || this.settings.serverEntries.length === 0) {
+             const oldSettings: any = await this.loadData();
+             // 古い設定ファイルが存在し、かつ新しいserverEntries形式でない場合
+             if (oldSettings && !Array.isArray(oldSettings.serverEntries) && oldSettings.host && oldSettings.port && oldSettings.serveDir !== undefined) {
+                 this.log('info', 'Migrating old single server settings...');
+                 const newEntry: ServerEntrySettings = {
+                     id: typeof uuidv4 !== 'undefined' ? uuidv4() : 'migrated-server-1', // uuid がない場合は仮ID
+                     name: 'Default Server (Migrated)',
+                     host: oldSettings.host,
+                     port: oldSettings.port,
+                     serveDir: oldSettings.serveDir,
+                     enableWhitelist: oldSettings.enableWhitelist ?? DEFAULT_SERVER_ENTRY.enableWhitelist,
+                     whitelistFiles: oldSettings.whitelistFiles ?? DEFAULT_SERVER_ENTRY.whitelistFiles,
+                     authToken: oldSettings.authToken ?? DEFAULT_SERVER_ENTRY.authToken,
+                     enableHttps: oldSettings.enableHttps ?? DEFAULT_SERVER_ENTRY.enableHttps,
+                     sslCertPath: oldSettings.sslCertPath ?? DEFAULT_SERVER_ENTRY.sslCertPath,
+                     sslKeyPath: oldSettings.sslKeyPath ?? DEFAULT_SERVER_ENTRY.sslKeyPath,
+                 };
+                 this.settings.serverEntries = [newEntry];
+                 await this.saveSettings(false, false); // 保存のみ
+                 this.log('info', 'Migration complete.');
+                 new Notice('Local Server: Old settings migrated to a new server entry.');
+             } else if (oldSettings === null) {
+                 this.log('info', 'No existing settings file found. Starting fresh.');
+             } else {
+                 this.log('warn', 'No server entries found in settings or settings file format is unexpected. Please add a new entry in settings.');
+                 new Notice('Local Server: サーバーエントリが設定されていません。プラグイン設定で新しいエントリを追加してください。');
+             }
+        }
 
-		// serveDir の実体パスを取得
-		try {
-			this.servedRealPath = fs.realpathSync(this.settings.serveDir);
-		} catch (err) {
-			console.error(`serveDirの実体パスの解決に失敗しました: ${this.settings.serveDir}`, err);
-			this.servedRealPath = path.resolve(this.settings.serveDir);
-		}
 
-		// 設定画面タブの追加
 		this.addSettingTab(new LocalServerSettingTab(this.app, this));
 
-		// HTTP サーバーの作成
-		this.server = http.createServer((req, res) => {
-			if (!req.url) {
-				res.statusCode = 400;
-				res.end('Bad Request');
+		this.statusBarItemEl = this.addStatusBarItem();
+		this.statusBarItemEl.addClass('mod-clickable');
+		this.updateStatusBarIcon(); // サーバー起動前に一度更新
+		this.statusBarItemEl.onclick = () => {
+			new LogModal(this.app, this.logMessages).open();
+		};
+
+        // すべてのサーバーを起動
+		this.startAllServers();
+
+		this.log('info', 'LocalServerPlugin loaded.');
+	}
+
+	onunload() {
+		this.log('info', 'LocalServerPlugin unloading...');
+		this.stopAllServers(); // stopAllServers はマップをクリアする
+		if (this.statusBarItemEl) {
+			this.statusBarItemEl.remove();
+		}
+		// this.runningServers.clear(); // stopAllServers でクリアされる
+		this.settingTabFileList.clear();
+		this.log('info', 'LocalServerPlugin unloaded.');
+	}
+
+	log(type: 'info' | 'warn' | 'error', message: string, entryName?: string, ...optionalParams: any[]) {
+		const timestamp = new Date();
+        const logType: 'log' | 'warn' | 'error' = type === 'info' ? 'log' : type;
+        const prefix = entryName ? `[Server:${entryName}]` : '[LocalServer]';
+        const fullMessage = `${prefix} ${message}`;
+
+		switch (type) {
+			case 'info':
+				console.log(fullMessage, ...optionalParams);
+				break;
+			case 'warn':
+				console.warn(fullMessage, ...optionalParams);
+				break;
+			case 'error':
+				console.error(fullMessage, ...optionalParams);
+				break;
+		}
+
+		this.logMessages.push({ timestamp, type: logType, message: fullMessage });
+		if (this.logMessages.length > MAX_LOG_ENTRIES) {
+			this.logMessages.shift();
+		}
+	}
+
+	updateStatusBarIcon() {
+		if (!this.statusBarItemEl) return;
+
+        const runningCount = Array.from(this.runningServers.values()).filter(info => info.status === 'running').length;
+        const errorCount = Array.from(this.runningServers.values()).filter(info => info.status === 'error').length;
+        const totalCount = this.settings.serverEntries.length;
+
+        if (totalCount === 0) {
+            this.statusBarItemEl.setText('🌐 Idle');
+            this.statusBarItemEl.ariaLabel = 'Local server plugin is idle. Configure server entries in settings.';
+        } else if (runningCount === totalCount) {
+             this.statusBarItemEl.setText(`🌐 ${runningCount} Running`);
+             this.statusBarItemEl.ariaLabel = `Local server plugin: ${runningCount} server(s) running. Click to view logs.`;
+        } else if (runningCount > 0) {
+             this.statusBarItemEl.setText(`🌐 ${runningCount}/${totalCount} Running`);
+             this.statusBarItemEl.ariaLabel = `Local server plugin: ${runningCount} of ${totalCount} server(s) running (${errorCount} error(s)). Click to view logs.`;
+        } else if (errorCount > 0) {
+             this.statusBarItemEl.setText(`🌐 ${errorCount}/${totalCount} Errors`); // エラー数/合計数を表示
+             this.statusBarItemEl.ariaLabel = `Local server plugin: ${errorCount} server(s) failed to start. Click to view logs.`;
+        } else {
+             // totalCount > 0 だが running も error も 0 の場合 (すべて stopped 状態など)
+             this.statusBarItemEl.setText('🌐 Stopped');
+             this.statusBarItemEl.ariaLabel = 'Local server plugin: All servers stopped. Click to view logs.';
+        }
+	}
+
+	resolveServedPath(entry: ServerEntrySettings): string | null {
+        if (!entry.serveDir) {
+            return null;
+        }
+        try {
+            let potentialPath = entry.serveDir;
+            if (!path.isAbsolute(potentialPath)) {
+                const adapter = this.app.vault.adapter;
+                const basePath = adapter && typeof (adapter as any).getBasePath === 'function'
+                    ? (adapter as any).getBasePath()
+                    : null;
+
+                if (basePath) {
+                    potentialPath = path.join(basePath, entry.serveDir);
+                } else {
+                    this.log('error', `Cannot resolve relative path "${entry.serveDir}" for entry "${entry.name}". Vault adapter base path not available.`, entry.name);
+                    return null;
+                }
+            }
+
+            const normalizedPotentialPath = path.normalize(potentialPath);
+            if (!fs.existsSync(normalizedPotentialPath)) {
+                this.log('error', `Serve folder path "${normalizedPotentialPath}" does not exist for entry "${entry.name}".`, entry.name);
+                return null;
+            }
+            const realPath = fs.realpathSync(normalizedPotentialPath);
+
+            if (!fs.statSync(realPath).isDirectory()) {
+                 this.log('error', `Resolved serve path "${realPath}" for entry "${entry.name}" is not a directory.`, entry.name);
+                 return null;
+            }
+
+            this.log('info', `Serve folder resolved to "${realPath}" for entry "${entry.name}".`, entry.name);
+            return realPath;
+        } catch (err: any) {
+            this.log('error', `Serve folder path resolution error for entry "${entry.name}" ("${entry.serveDir}"): ${err.message}`, entry.name, err);
+            return null;
+        }
+    }
+
+	async startAllServers() {
+		await this.stopAllServers(); // 既存のサーバーをすべて停止
+
+		this.runningServers.clear(); // マップをクリア
+
+		if (this.settings.serverEntries.length === 0) {
+			this.log('info', 'No server entries configured. Skipping server start.');
+			this.updateStatusBarIcon();
+			return;
+		}
+
+		for (const entry of this.settings.serverEntries) {
+            // ID がないエントリがあれば生成
+            // @ts-ignore // uuidv4 が undefined の可能性を無視
+            if (!entry.id || typeof uuidv4 === 'undefined') {
+                 entry.id = typeof uuidv4 !== 'undefined' ? uuidv4() : `temp-${Date.now()}-${Math.random()}`; // uuid なければ仮ID
+                 if (typeof uuidv4 === 'undefined') {
+                     this.log('warn', `UUID library not available, using temporary ID "${entry.id}" for entry "${entry.name}". Install uuid for stable IDs.`, entry.name);
+                 } else {
+                     this.log('warn', `Assigned new ID "${entry.id}" to server entry "${entry.name}".`, entry.name);
+                 }
+            }
+
+
+            const servedRealPath = this.resolveServedPath(entry);
+
+            if (!servedRealPath) {
+                this.log('error', `Skipping server start for entry "${entry.name}" due to invalid serve folder.`, entry.name);
+                 this.runningServers.set(entry.id, { server: null, entry, servedRealPath: null, status: 'error', errorMessage: 'Invalid serve folder' }); // エラー状態を記録
+                continue;
+            }
+
+			const requestHandler = (req: http.IncomingMessage, res: http.ServerResponse) => {
+                 // *** Error 8 Correction ***
+                 // Access req.socket.server which might not be typed correctly
+                 const receivingServer = (req.socket as any).server;
+                 // *** End Correction ***
+
+                 const entryId = (receivingServer as any)?.__entryId; // オプショナルチェイニングを追加
+                 const serverInfo = this.runningServers.get(entryId);
+
+                 if (!serverInfo || serverInfo.status === 'error' || !serverInfo.servedRealPath || !serverInfo.server) {
+                      res.statusCode = 503;
+                      res.end('Service Unavailable: Server configuration missing or invalid.');
+                      this.log('error', `Request received on server ID ${entryId || 'unknown'}, but configuration is missing or invalid.`, entryId || 'unknown', req.method, req.url);
+                      return;
+                 }
+
+                 this.handleRequest(req, res, serverInfo.entry, serverInfo.servedRealPath);
+            };
+
+			try {
+				let server: http.Server | https.Server;
+                let protocol = entry.enableHttps ? 'https' : 'http';
+
+				if (entry.enableHttps) {
+					if (!entry.sslCertPath || !entry.sslKeyPath) {
+						this.log('error', `Cannot start HTTPS server for entry "${entry.name}": SSL certificate or key path is not set.`, entry.name);
+                        this.runningServers.set(entry.id, { server: null, entry, servedRealPath, status: 'error', errorMessage: 'SSL paths not set' });
+                        continue;
+					}
+					let options: https.ServerOptions;
+					try {
+	                    const certPath = path.resolve(entry.sslCertPath);
+	                    const keyPath = path.resolve(entry.sslKeyPath);
+						options = {
+							key: fs.readFileSync(keyPath),
+							cert: fs.readFileSync(certPath)
+						};
+                        this.log('info', `Using SSL cert: "${certPath}", key: "${keyPath}" for entry "${entry.name}".`, entry.name);
+					} catch (err: any) {
+						this.log('error', `Error reading SSL files for entry "${entry.name}": ${err.message}`, entry.name, err);
+                        this.runningServers.set(entry.id, { server: null, entry, servedRealPath, status: 'error', errorMessage: `SSL file error: ${err.message}` });
+						continue;
+					}
+					server = https.createServer(options, requestHandler);
+				} else {
+					server = http.createServer(requestHandler);
+				}
+
+                // サーバーインスタンスにエントリIDを紐づける
+                (server as any).__entryId = entry.id;
+
+				server.on('error', (err: NodeJS.ErrnoException) => {
+                    let errorMessage = `Server error for "${entry.name}" (${entry.host}:${entry.port}): ${err.message} (Code: ${err.code})`;
+					if (err.code === 'EADDRINUSE') {
+						errorMessage = `Port ${entry.port} is already in use by another process. Server "${entry.name}" failed to start.`;
+					} else if (err.code === 'EACCES') {
+                        errorMessage = `Permission denied to bind to ${entry.host}:${entry.port} for server "${entry.name}". Try a port number > 1024 or check permissions.`;
+                    }
+                    this.log('error', errorMessage, entry.name, err);
+                    const info = this.runningServers.get(entry.id);
+                    if (info) {
+                         // *** Error 4 Correction ***
+                        info.status = 'error';
+                         // *** End Correction ***
+                        info.errorMessage = errorMessage;
+                        info.server = null; // エラー時はサーバー参照をnullにする
+                    }
+                    this.updateStatusBarIcon();
+                    new Notice(errorMessage, 8000); // 通知時間を少し長く
+				});
+
+				server.listen(entry.port, entry.host, () => {
+					const url = `${protocol}://${entry.host}:${entry.port}`;
+					this.log('info', `Server "${entry.name}" started at ${url}`, entry.name);
+					this.log('info', `Serving folder: "${servedRealPath}"`, entry.name);
+
+                    // サーバー起動成功情報をマップに記録
+                    // *** Error 4 Correction ***
+                    this.runningServers.set(entry.id, { server, entry, servedRealPath, status: 'running' });
+                    // *** End Correction ***
+
+					this.updateStatusBarIcon();
+					new Notice(`Local Server "${entry.name}" started at ${url}`);
+				});
+
+			} catch (err: any) {
+				this.log('error', `Failed to create server for entry "${entry.name}": ${err.message}`, entry.name, err);
+                 // *** Error 4 Correction ***
+                 this.runningServers.set(entry.id, { server: null, entry, servedRealPath, status: 'error', errorMessage: `Creation error: ${err.message}` });
+                 // *** End Correction ***
+				this.updateStatusBarIcon();
+				new Notice(`Local Server "${entry.name}": サーバーの起動に失敗しました: ${err.message}`, 8000);
+			}
+		}
+
+        this.updateStatusBarIcon();
+	}
+
+	stopAllServers() {
+		this.log('info', 'Stopping all local servers...');
+		const stopPromises: Promise<void>[] = [];
+
+		this.runningServers.forEach((serverInfo, entryId) => {
+             if (serverInfo.server) {
+                 const stopPromise = new Promise<void>((resolve) => {
+                     serverInfo.server!.close((err) => {
+                         if (err) {
+                             this.log('error', `Error stopping server "${serverInfo.entry.name}": ${err.message}`, serverInfo.entry.name);
+                              // *** Error 4 Correction ***
+                             serverInfo.status = 'error'; // 停止エラーも 'error' 状態として記録（起動エラーと区別するなら別の状態も検討）
+                             // *** End Correction ***
+                             serverInfo.errorMessage = `Stop error: ${err.message}`;
+                         } else {
+                             this.log('info', `Server "${serverInfo.entry.name}" stopped.`, serverInfo.entry.name);
+                             // *** Error 4 Correction ***
+                             serverInfo.status = 'stopped'; // 停止成功
+                             // *** End Correction ***
+                             delete serverInfo.errorMessage;
+                         }
+                         resolve();
+                     });
+                      // 強制停止のタイムアウト
+                      setTimeout(() => {
+                           // serverInfo.server がまだ存在し、かつ close イベントが来ていない場合
+                           // (serverInfo.server as any)._connections は非公式なので、より安全には socket をリストして destroy する必要があるが、複雑になるためここでは省略
+                           if (serverInfo.server && serverInfo.status !== 'stopped' && serverInfo.status !== 'error') {
+                                this.log('warn', `Server "${serverInfo.entry.name}" close timed out. Forcing stop state.`, serverInfo.entry.name);
+                                try {
+                                    // 強制的に接続を閉じる試み（非公式・不安定な可能性あり）
+                                    (serverInfo.server as any).closeIdleConnections();
+                                    (serverInfo.server as any).closeAllConnections();
+                                    serverInfo.server.close(); // 再度試す
+                                } catch (forceCloseErr: any) {
+                                     this.log('error', `Error during force close attempt for "${serverInfo.entry.name}": ${forceCloseErr.message}`, serverInfo.entry.name);
+                                } finally {
+                                     // *** Error 4 Correction ***
+                                     serverInfo.status = 'stopped'; // 停止状態にする
+                                     // *** End Correction ***
+                                     delete serverInfo.errorMessage;
+                                     serverInfo.server = null; // 参照をクリア
+                                     resolve(); // resolve を呼んで promise を完了させる
+                                }
+                           } else {
+                                // サーバーが既に停止状態、エラー状態、または server が null
+                                resolve();
+                           }
+                      }, 3000); // 3秒待つ
+                 });
+                 stopPromises.push(stopPromise);
+             } else {
+                  // serverインスタンスがnullの場合 (起動エラーなどで既に停止している)
+                   // *** Error 4 Correction ***
+                   serverInfo.status = serverInfo.status === 'error' ? 'error' : 'stopped'; // 起動エラーならそのままエラー、そうでなければ停止済み扱い
+                   // *** End Correction ***
+             }
+		});
+
+		return Promise.all(stopPromises).then(() => {
+             this.runningServers.clear(); // すべて停止したらマップをクリア
+			 this.log('info', 'All local servers stopped.');
+             this.updateStatusBarIcon();
+		});
+	}
+
+
+	private handleRequest(req: http.IncomingMessage, res: http.ServerResponse, entry: ServerEntrySettings, servedRealPath: string) {
+		const startTime = Date.now();
+		let statusCode = 200;
+
+		res.setHeader('X-Content-Type-Options', 'nosniff');
+		res.setHeader('X-Frame-Options', 'DENY');
+        res.setHeader('Referrer-Policy', 'no-referrer');
+
+        // CORS ヘッダー (必要であれば、エントリ設定に追加するなどして制御可能にする)
+        // res.setHeader('Access-Control-Allow-Origin', '*');
+
+		try {
+			if (!req.url || !req.method) {
+				statusCode = 400;
+				this.sendResponse(res, statusCode, 'Bad Request', startTime, entry.name, req.method, req.url);
+				return;
+			}
+            const hostHeader = req.headers['host'] || `${entry.host}:${entry.port}`;
+			const protocol = entry.enableHttps ? 'https' : 'http';
+			const baseUrl = `${protocol}://${hostHeader}`;
+
+			if (entry.authToken) {
+				const authHeader = req.headers['authorization'];
+				if (!authHeader || !authHeader.startsWith('Bearer ')) {
+					statusCode = 401;
+                    res.setHeader('WWW-Authenticate', 'Bearer realm="LocalServer"');
+					this.sendResponse(res, statusCode, 'Unauthorized: Missing authentication token.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+                const token = authHeader.substring(7);
+                if (token !== entry.authToken) {
+                    statusCode = 403;
+                    this.sendResponse(res, statusCode, 'Forbidden: Invalid authentication token.', startTime, entry.name, req.method, req.url);
+                    return;
+                }
+			}
+
+			let pathname: string;
+			try {
+				const parsedUrl = new URL(req.url, baseUrl);
+				pathname = decodeURIComponent(parsedUrl.pathname);
+			} catch (e) {
+				statusCode = 400;
+				this.sendResponse(res, statusCode, 'Bad Request: Invalid URL encoding.', startTime, entry.name, req.method, req.url);
 				return;
 			}
 
-			// 認証チェック（認証トークンが設定されている場合のみ）
-			if (this.settings.authToken) {
-				const authHeader = req.headers['authorization'];
-				if (!authHeader || authHeader !== `Bearer ${this.settings.authToken}`) {
-					res.statusCode = 403;
-					res.end('Forbidden: Invalid or missing authentication token.');
-					return;
-				}
-			}
+            if (!servedRealPath) {
+                statusCode = 503;
+                this.sendResponse(res, statusCode, 'Service Unavailable: Server configuration error.', startTime, entry.name, req.method, req.url);
+                this.log('error', `Internal error: servedRealPath is null for running server entry "${entry.name}".`, entry.name, req.method, req.url);
+                return;
+            }
 
-			// 基本的な CORS ヘッダーの設定（指定ホスト・ポートからのアクセスのみ許可）
-			res.setHeader('Access-Control-Allow-Origin', `http://${this.settings.host}:${this.settings.port}`);
+            const safePathname = path.posix.normalize('/' + pathname).replace(/^(\.\.[\/\\])+/, '');
+            const cleanPathname = safePathname.replace(/\0/g, '');
+			const requestedPath = path.join(servedRealPath, cleanPathname);
 
-			// URL の解析
-			const parsedUrl = new URL(req.url, `http://${this.settings.host}:${this.settings.port}`);
-			const pathname = decodeURIComponent(parsedUrl.pathname);
-
-			// serveDir に対してリクエストされたファイルのフルパスを生成
-			const requestedPath = path.join(this.servedRealPath, pathname);
-			const normalizedPath = path.normalize(requestedPath);
-
-			// シンボリックリンクなどを解決して実体パスを取得
-			fs.realpath(normalizedPath, (err, resolvedPath) => {
+			fs.realpath(requestedPath, (err, resolvedPath) => {
 				if (err) {
-					res.statusCode = 404;
-					res.end('Not Found');
+					statusCode = 404;
+					this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url, cleanPathname);
 					return;
 				}
 
-				// serveDir の実体パス内にあるかチェック（ディレクトリトラバーサル防止）
-				if (!resolvedPath.startsWith(this.servedRealPath)) {
-					res.statusCode = 403;
-					res.end('Forbidden');
+				if (!resolvedPath.startsWith(servedRealPath + path.sep) && resolvedPath !== servedRealPath) {
+					statusCode = 403;
+                    this.log('warn', `Forbidden access attempt: ${cleanPathname} resolved to ${resolvedPath}, which is outside of "${servedRealPath}" for entry "${entry.name}".`, entry.name);
+					this.sendResponse(res, statusCode, 'Forbidden', startTime, entry.name, req.method, req.url, cleanPathname);
 					return;
 				}
 
-				// ホワイトリストモードが有効な場合、serveDir からの相対パスが whitelistFiles に含まれているかをチェック
-				if (this.settings.enableWhitelist) {
-					const relativePath = path.relative(this.servedRealPath, resolvedPath);
-					if (!this.settings.whitelistFiles.includes(relativePath)) {
-						res.statusCode = 403;
-						res.end('Forbidden: File not whitelisted.');
+				if (entry.enableWhitelist) {
+					const relativePath = path.relative(servedRealPath, resolvedPath);
+					if (!entry.whitelistFiles.includes(relativePath)) {
+						statusCode = 403;
+						this.sendResponse(res, statusCode, 'Forbidden: File not whitelisted.', startTime, entry.name, req.method, req.url, cleanPathname);
 						return;
 					}
 				}
 
-				// ファイルまたはディレクトリかを確認
-				fs.stat(resolvedPath, (err, stats) => {
-					if (err) {
-						res.statusCode = 404;
-						res.end('Not Found');
+				fs.stat(resolvedPath, (statErr, stats) => {
+					if (statErr) {
+						statusCode = (statErr.code === 'ENOENT' ? 404 : 500);
+                        this.log('error', `Error stating file ${resolvedPath} for entry "${entry.name}": ${statErr.message}`, entry.name, statErr);
+						this.sendResponse(res, statusCode, statusCode === 404 ? 'Not Found' : 'Internal Server Error', startTime, entry.name, req.method, req.url, cleanPathname);
 						return;
 					}
 
 					if (stats.isDirectory()) {
-						// ディレクトリの場合、簡易的なディレクトリリスティングを生成
-						fs.readdir(resolvedPath, (err, files) => {
-							if (err) {
-								res.statusCode = 500;
-								res.end('Internal Server Error');
-								return;
-							}
-
-							res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-							res.write(`<html><head><meta charset="utf-8"><title>Directory Listing</title></head><body>`);
-							res.write(`<h1>Index of ${pathname}</h1>`);
-							res.write('<ul>');
-							if (pathname !== '/') {
-								const parent = path.posix.dirname(pathname);
-								res.write(`<li><a href="${parent}">..</a></li>`);
-							}
-							files.forEach(file => {
-								const filePath = path.posix.join(pathname, file);
-								res.write(`<li><a href="${filePath}">${file}</a></li>`);
-							});
-							res.write('</ul></body></html>');
-							res.end();
-						});
+                        if (!cleanPathname.endsWith('/')) {
+                            statusCode = 301;
+                            const redirectPath = cleanPathname.split('/').map(encodeURIComponent).join('/') + '/';
+                            res.setHeader('Location', redirectPath);
+                            this.sendResponse(res, statusCode, 'Redirecting to directory.', startTime, entry.name, req.method, req.url);
+                            return;
+                        }
+                        this.serveDirectoryListing(res, resolvedPath, cleanPathname, entry.name, startTime, entry.enableWhitelist, entry.whitelistFiles, servedRealPath, req.method, req.url);
 					} else if (stats.isFile()) {
-						// ファイルの場合、ストリームで返す
-						const stream = fs.createReadStream(resolvedPath);
-						stream.on('open', () => {
-							const ext = path.extname(resolvedPath).toLowerCase();
-							let contentType = 'application/octet-stream';
-							if (ext === '.html' || ext === '.htm') contentType = 'text/html';
-							else if (ext === '.js') contentType = 'application/javascript';
-							else if (ext === '.css') contentType = 'text/css';
-							else if (ext === '.json') contentType = 'application/json';
-							else if (ext === '.png') contentType = 'image/png';
-							else if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
-							else if (ext === '.gif') contentType = 'image/gif';
-							else if (ext === '.svg') contentType = 'image/svg+xml';
-							res.writeHead(200, { 'Content-Type': contentType });
-							stream.pipe(res);
-						});
-						stream.on('error', (error) => {
-							res.statusCode = 500;
-							res.end('Internal Server Error');
-						});
+						this.serveFile(res, resolvedPath, stats, entry.name, startTime, req.method, req.url);
 					} else {
-						res.statusCode = 403;
-						res.end('Forbidden');
+						statusCode = 403;
+						this.sendResponse(res, statusCode, 'Forbidden: Not a file or directory.', startTime, entry.name, req.method, req.url, cleanPathname);
 					}
 				});
 			});
-		});
 
-		this.server.listen(this.settings.port, this.settings.host, () => {
-			console.log(`Local server started at http://${this.settings.host}:${this.settings.port}`);
-			console.log(`Serving folder: ${this.servedRealPath}`);
+		} catch (error: any) {
+			statusCode = 500;
+			this.log('error', `Internal Server Error processing ${req.method} ${req.url} for entry "${entry.name}": ${error.message}\n${error.stack}`, entry.name, error);
+			if (!res.writableEnded) {
+				try {
+                    res.writeHead(statusCode, { 'Content-Type': 'text/plain; charset=utf-8' });
+                    res.end('Internal Server Error');
+                } catch (writeError: any) {
+                    this.log('error', `Error sending 500 response for "${entry.name}": ${writeError.message}`, entry.name, writeError);
+                }
+			}
+			this.logRequest(startTime, statusCode, entry.name, req.method, req.url);
+		}
+	}
+
+	private sendResponse(
+        res: http.ServerResponse,
+        statusCode: number,
+        message: string,
+        startTime: number,
+        entryName: string,
+        method?: string,
+        url?: string,
+        filePath?: string
+    ) {
+		try {
+            if (!res.writableEnded) {
+                if (!res.headersSent) {
+                    res.writeHead(statusCode, { 'Content-Type': 'text/plain; charset=utf-8' });
+                }
+                res.end(message);
+            }
+        } catch (error: any) {
+             this.log('error', `Error sending response (Status ${statusCode}) for "${entryName}": ${error.message}`, entryName);
+        } finally {
+            this.logRequest(startTime, statusCode, entryName, method, url, filePath);
+        }
+	}
+
+    private serveDirectoryListing(
+        res: http.ServerResponse,
+        dirPath: string,
+        pathname: string,
+        entryName: string,
+        startTime: number,
+        enableWhitelist: boolean,
+        whitelistFiles: string[],
+        servedRealPath: string,
+        method?: string,
+        url?: string
+    ) {
+		fs.readdir(dirPath, { withFileTypes: true }, (err, files) => {
+			if (err) {
+				this.sendResponse(res, 500, 'Internal Server Error: Could not read directory', startTime, entryName, method, url, pathname);
+				return;
+			}
+
+			res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            const escapeHtml = (unsafe: string): string => {
+                return unsafe
+                                     .replace(/&/g, "&amp;")
+                                     .replace(/</g, "&lt;")
+                                     .replace(/>/g, "&gt;")
+                                     .replace(/"/g, "&quot;")
+                                     .replace(/'/g, "&#39;");
+            }
+			const escapedPathname = escapeHtml(pathname);
+
+			res.write(`<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Index of ${escapedPathname}</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 1em; color: var(--text-normal); background-color: var(--background-primary); }
+        h1 { border-bottom: 1px solid var(--background-modifier-border); padding-bottom: 0.5em; margin-bottom: 1em; }
+        ul { list-style: none; padding-left: 0; }
+        li { margin-bottom: 0.5em; display: flex; align-items: center; }
+        a { text-decoration: none; color: var(--text-accent); word-break: break-all; }
+        a:hover { text-decoration: underline; color: var(--text-accent-hover); }
+        .icon { display: inline-block; width: 1.5em; text-align: center; margin-right: 0.5em; }
+        .dir::before { content: '📁'; }
+        .file::before { content: '📄'; }
+        .parent::before { content: '⬆️'; }
+    </style>
+</head>
+<body>
+    <h1>Index of ${escapedPathname}</h1>
+    <ul>`);
+
+            const isRoot = pathname === '/';
+			if (!isRoot) {
+                const parentPath = path.posix.dirname(pathname.endsWith('/') ? pathname.slice(0, -1) : pathname);
+                if (parentPath !== pathname) {
+                    const parentHref = (parentPath === '/' ? '/' : parentPath.split('/').map(encodeURIComponent).join('/') + '/');
+                    res.write(`<li><span class="icon parent"></span><a href="${parentHref}">..</a></li>`);
+                }
+			}
+
+			files.sort((a, b) => {
+                // *** Error 9-12: Assuming the syntax below is correct. No changes made here.
+                // If error persists, check surrounding code or simplify sort.
+                if (a.isDirectory() && !b.isDirectory()) return -1;
+                if (!a.isDirectory() && b.isDirectory()) return 1;
+                return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+                // *** End of Error 9-12 consideration ***
+            }).forEach(file => {
+				const isDir = file.isDirectory();
+                const entryNameHtml = escapeHtml(file.name); // Use escaped name for HTML display
+                let iconClass = isDir ? 'dir' : 'file';
+
+                let allow = true;
+                 if (enableWhitelist) {
+                    const currentEntryPath = path.join(dirPath, file.name);
+                    const relativePath = path.relative(servedRealPath, currentEntryPath);
+
+                    if (isDir) {
+                         allow = whitelistFiles.some(f => f === relativePath || (f.startsWith(relativePath + path.sep) && f !== relativePath));
+                    } else {
+                         allow = whitelistFiles.includes(relativePath);
+                    }
+                 }
+
+                 if (allow) {
+                    const encodedName = encodeURIComponent(file.name);
+                    const href = path.posix.join(pathname, encodedName) + (isDir ? '/' : '');
+                    res.write(`<li><span class="icon ${iconClass}"></span><a href="${href}">${entryNameHtml}${isDir ? '/' : ''}</a></li>`);
+                 }
+			});
+
+			res.write(`</ul>
+</body>
+</html>`);
+			res.end();
+			this.logRequest(startTime, 200, entryName, method, url, pathname);
 		});
 	}
 
-	onunload() {
-		console.log('LocalServerPlugin unloading...');
-		if (this.server) {
-			this.server.close(() => {
-				console.log('Local server stopped.');
+	private serveFile(
+        res: http.ServerResponse,
+        filePath: string,
+        stats: fs.Stats,
+        entryName: string,
+        startTime: number,
+        method?: string,
+        url?: string
+    ) {
+		const stream = fs.createReadStream(filePath);
+		let statusCode = 200;
+
+		stream.on('open', () => {
+			const contentType = this.getContentType(filePath);
+			res.writeHead(statusCode, {
+				'Content-Type': contentType,
+				'Content-Length': stats.size,
+                'Last-Modified': stats.mtime.toUTCString()
 			});
+			stream.pipe(res);
+            stream.on('end', () => {
+                this.logRequest(startTime, statusCode, entryName, method, url, filePath);
+            });
+		});
+
+		stream.on('error', (error) => {
+			statusCode = 500;
+			this.log('error', `Error streaming file ${filePath} for "${entryName}": ${error.message}`, entryName);
+            this.sendResponse(res, statusCode, 'Internal Server Error', startTime, entryName, method, url, filePath);
+		});
+
+        res.on('error', (error) => {
+            this.log('warn', `Response error for "${entryName}" (${filePath}): ${error.message}. Client may have disconnected.`, entryName);
+            stream.destroy();
+            this.logRequest(startTime, res.statusCode || 500, entryName, method, url, filePath);
+        });
+
+        res.on('close', () => {
+             if (!res.writableEnded) {
+                 this.log('warn', `Connection closed prematurely for "${entryName}" (${filePath})`, entryName);
+                 stream.destroy();
+                 this.logRequest(startTime, res.statusCode || 499, entryName, method, url, filePath);
+             }
+        });
+	}
+
+	private logRequest(startTime: number, statusCode: number, entryName: string, method?: string, url?: string, filePath?: string) {
+		const duration = Date.now() - startTime;
+		const message = `${method || '?'} ${url || '?'} - ${statusCode} (${duration}ms)${filePath ? ` [${path.basename(filePath)}]` : ''}`;
+		if (statusCode >= 500) {
+			this.log('error', message, entryName);
+		} else if (statusCode >= 400) {
+            this.log('warn', message, entryName);
+        } else {
+			this.log('info', message, entryName);
+		}
+	}
+
+	private getContentType(filePath: string): string {
+		const ext = path.extname(filePath).toLowerCase();
+		switch (ext) {
+			case '.html': case '.htm': return 'text/html; charset=utf-8';
+			case '.css': return 'text/css; charset=utf-8';
+			case '.js': case '.mjs': return 'application/javascript; charset=utf-8';
+			case '.json': return 'application/json; charset=utf-8';
+			case '.xml': return 'application/xml; charset=utf-8';
+			case '.txt': case '.md': case '.log': return 'text/plain; charset=utf-8';
+            case '.csv': return 'text/csv; charset=utf-8';
+			case '.png': return 'image/png';
+			case '.jpg': case '.jpeg': return 'image/jpeg';
+			case '.gif': return 'image/gif';
+			case '.svg': return 'image/svg+xml';
+			case '.webp': return 'image/webp';
+			case '.ico': return 'image/vnd.microsoft.icon';
+            case '.avif': return 'image/avif';
+            case '.bmp': return 'image/bmp';
+            case '.tif': case '.tiff': return 'image/tiff';
+			case '.woff': return 'font/woff';
+			case '.woff2': return 'font/woff2';
+			case '.ttf': return 'font/ttf';
+			case '.otf': return 'font/otf';
+            case '.eot': return 'application/vnd.ms-fontobject';
+			case '.mp4': return 'video/mp4';
+			case '.webm': return 'video/webm';
+            case '.ogv': return 'video/ogg';
+			case '.mp3': return 'audio/mpeg';
+			case '.ogg': case '.oga': return 'audio/ogg';
+			case '.wav': return 'audio/wav';
+            case '.weba': return 'audio/webm';
+            case '.aac': return 'audio/aac';
+            case '.midi': case '.mid': return 'audio/midi';
+			case '.pdf': return 'application/pdf';
+			case '.zip': return 'application/zip';
+            case '.gz': return 'application/gzip';
+            case '.tar': return 'application/x-tar';
+            case '.rar': return 'application/vnd.rar';
+            case '.7z': return 'application/x-7z-compressed';
+            case '.doc': return 'application/msword';
+            case '.docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+            case '.xls': return 'application/vnd.ms-excel';
+            case '.xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            case '.ppt': return 'application/vnd.ms-powerpoint';
+            case '.pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+            case '.epub': return 'application/epub+zip';
+            case '.wasm': return 'application/wasm';
+			default: return 'application/octet-stream';
 		}
 	}
 
@@ -192,14 +809,79 @@ export default class LocalServerPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
 
-	async saveSettings() {
+	async saveSettings(triggerServerReload: boolean = false, triggerWhitelistUpdate: boolean = false) {
+        // 設定オブジェクト自体は参照渡しなので、直接変更されている
+        // 変更をファイルに保存
 		await this.saveData(this.settings);
+
+        // サーバー設定の変更があった場合は、すべてのサーバーを再起動
+		if (triggerServerReload) {
+            this.log('info', 'Server settings changed, restarting all servers...');
+            await this.startAllServers();
+        } else if (triggerWhitelistUpdate) {
+            // ホワイトリストはリロード不要なので何もしない (handleRequestが常に最新設定を読む)
+             this.log('info', 'Whitelist settings updated.');
+        } else {
+             this.log('info', 'Settings updated (no server restart needed).');
+        }
 	}
 }
 
-/**
- * プラグイン設定画面の定義
- */
+class LogModal extends Modal {
+	logs: { timestamp: Date, type: 'log' | 'warn' | 'error', message: string }[];
+
+	constructor(app: App, logs: { timestamp: Date, type: 'log' | 'warn' | 'error', message: string }[]) {
+		super(app);
+		this.logs = [...logs].reverse();
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.addClass('local-server-log-modal');
+
+		contentEl.createEl('h2', { text: 'Local Server Logs' });
+
+		const controlsEl = contentEl.createDiv('local-server-log-controls');
+		controlsEl.createEl('button', { text: 'Close' }).onclick = () => {
+			this.close();
+		};
+
+		const logContainer = contentEl.createDiv('local-server-log-container');
+		if (this.logs.length === 0) {
+			logContainer.createEl('p', { text: 'No logs yet.' });
+		} else {
+			this.logs.forEach(log => {
+				const logEntry = logContainer.createDiv({ cls: `log-entry log-${log.type}` });
+                // *** Error 6-7: Assuming the syntax below is correct, no changes made here.
+                // If error persists, try simpler format: log.timestamp.toLocaleTimeString()
+				logEntry.createSpan({ cls: 'log-timestamp', text: log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) });
+                // *** End of Error 6-7 consideration ***
+                const messageSpan = logEntry.createSpan({ cls: 'log-message' });
+                messageSpan.innerHTML = log.message.replace(/\n/g, '<br>');
+			});
+		}
+
+        const style = contentEl.createEl('style');
+        style.textContent = `
+            .local-server-log-modal .modal-content { max-width: 80vw; width: 800px; max-height: 80vh; display: flex; flex-direction: column; }
+            .local-server-log-modal h2 { margin-bottom: 0.5em; }
+            .local-server-log-controls { margin-bottom: 1em; flex-shrink: 0; }
+            .local-server-log-container { flex-grow: 1; overflow-y: auto; border: 1px solid var(--background-modifier-border); padding: 0.5em 1em; font-family: var(--font-monospace); font-size: var(--font-ui-small); line-height: 1.4; background-color: var(--background-secondary); }
+            .log-entry { margin-bottom: 0.3em; display: flex; gap: 0.7em; }
+            .log-timestamp { color: var(--text-muted); min-width: 65px; user-select: none; }
+            .log-message { word-break: break-word; white-space: pre-wrap; }
+            .log-warn .log-message { color: var(--text-warning); }
+            .log-error .log-message { color: var(--text-error); font-weight: bold; }
+        `;
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+}
+
 class LocalServerSettingTab extends PluginSettingTab {
 	plugin: LocalServerPlugin;
 
@@ -208,154 +890,371 @@ class LocalServerSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	/**
-	 * 指定されたディレクトリ内の全ファイル（再帰的）の相対パスリストを取得する
-	 */
-	private listFilesRecursive(dir: string, baseDir: string): string[] {
+    private listFilesRecursive(dir: string, baseDir: string): string[] {
 		let results: string[] = [];
-		const list = fs.readdirSync(dir);
-		list.forEach(file => {
-			const fullPath = path.join(dir, file);
-			const stat = fs.statSync(fullPath);
-			if (stat && stat.isDirectory()) {
-				results = results.concat(this.listFilesRecursive(fullPath, baseDir));
-			} else {
-				results.push(path.relative(baseDir, fullPath));
-			}
-		});
+		try {
+			const list = fs.readdirSync(dir, { withFileTypes: true });
+			list.forEach(dirent => {
+                if (dirent.name.startsWith('.') || dirent.name === 'node_modules' || dirent.name === '@trash') {
+                    return;
+                }
+				const fullPath = path.join(dir, dirent.name);
+				if (dirent.isDirectory()) {
+					results = results.concat(this.listFilesRecursive(fullPath, baseDir));
+				} else if (dirent.isFile()){
+					results.push(path.relative(baseDir, fullPath));
+				} else if (dirent.isSymbolicLink()) {
+                    try {
+                        const linkRealPath = fs.realpathSync(fullPath);
+                        if (linkRealPath.startsWith(baseDir)) {
+                             const linkStat = fs.statSync(linkRealPath);
+                             if (linkStat.isFile()) {
+                                 results.push(path.relative(baseDir, fullPath));
+                             }
+                        } else {
+                            // this.plugin.log('debug', `Symbolic link "${fullPath}" points outside served directory. Ignoring.`);
+                        }
+                    } catch (linkErr: any) {
+                         // this.plugin.log('debug', `Could not resolve symbolic link "${fullPath}": ${linkErr.message}. Ignoring.`);
+                    }
+                }
+			});
+		} catch (err: any) {
+            if (err.code === 'EACCES' || err.code === 'EPERM') {
+                 this.plugin.log('warn', `Permission denied while listing files in ${dir}. Skipping.`);
+            } else {
+			    this.plugin.log('error', `Error listing files in ${dir}: ${err.message}`);
+            }
+		}
 		return results;
 	}
+
+    private refreshDisplay() {
+        this.display();
+    }
+
 
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: 'Local Server Plugin Settings' });
+		containerEl.createEl('h2', { text: 'Local Server Settings' });
 
-		new Setting(containerEl)
-			.setName('Host')
-			.setDesc('ローカルサーバーのホスト名（例：127.0.0.1 推奨）')
-			.addText(text =>
-				text
-					.setPlaceholder('127.0.0.1')
-					.setValue(this.plugin.settings.host)
-					.onChange(async (value) => {
-						if (value !== '127.0.0.1' && value !== 'localhost') {
-							console.warn('セキュリティ上、ホストは127.0.0.1またはlocalhostの使用を推奨します。');
-						}
-						this.plugin.settings.host = value;
-						await this.plugin.saveSettings();
-					})
-			);
+        containerEl.createEl('p', {
+            text: '複数のサーバーエントリを設定し、それぞれ異なるフォルダを公開できます。',
+            cls: 'setting-item-description'
+        });
 
-		new Setting(containerEl)
-			.setName('Port')
-			.setDesc('ローカルサーバーのポート番号（例：3000）')
-			.addText(text =>
-				text
-					.setPlaceholder('3000')
-					.setValue(this.plugin.settings.port.toString())
-					.onChange(async (value) => {
-						const port = Number(value);
-						if (!isNaN(port)) {
-							this.plugin.settings.port = port;
-							await this.plugin.saveSettings();
-						}
-					})
-			);
+        containerEl.createEl('h3', { text: 'Server Entries' });
 
-		// Serve Folder の設定（テキスト入力＋フォルダ選択ボタン）
-		new Setting(containerEl)
-			.setName('Serve Folder')
-			.setDesc('公開するフォルダーの絶対パスを設定します。OSのフォルダ選択ダイアログも利用できます。')
-			.addText(text =>
-				text
-					.setPlaceholder('/path/to/your/folder')
-					.setValue(this.plugin.settings.serveDir)
-					.onChange(async (value) => {
-						this.plugin.settings.serveDir = value;
-						await this.plugin.saveSettings();
-						this.display(); // UI の再描画
-					})
-			)
-			.addExtraButton(button => {
-				button.setIcon('folder-open');
-				button.setTooltip('Select Folder');
-				button.onClick(async () => {
-					// OSのフォルダ選択ダイアログを試行（※Obsidian標準ではサポートされないため、HTMLの input 要素を利用）
-					const inputEl = createEl('input', { type: 'file', attr: { webkitdirectory: 'true' } });
-					inputEl.onchange = async (e: Event) => {
-						// @ts-ignore
-						const files = inputEl.files;
-						if (files && files.length > 0) {
-							// 最初のファイルのディレクトリを利用
-							const file0 = files[0] as any; 
-							if (file0.path) { // path プロパティが存在するか確認
-								this.plugin.settings.serveDir = path.dirname(file0.path);
-								await this.plugin.saveSettings();
-								this.display();
-							}
-						}
-					};
-					inputEl.click();
-				});
-			});
+        const entryListEl = containerEl.createDiv();
 
-		// ホワイトリストの有効/無効設定
-		new Setting(containerEl)
-			.setName('Enable Whitelist')
-			.setDesc('有効にすると、フォルダー内のファイルのうち、チェックリストで選択したファイルのみが配信されます。')
-			.addToggle(toggle =>
-				toggle
-					.setValue(this.plugin.settings.enableWhitelist)
-					.onChange(async (value) => {
-						this.plugin.settings.enableWhitelist = value;
-						await this.plugin.saveSettings();
-						this.display();
-					})
-			);
+        if (this.plugin.settings.serverEntries.length === 0) {
+            entryListEl.createEl('p', { text: 'サーバーエントリがありません。新しいエントリを追加してください。', cls: 'setting-item-description' });
+        }
 
-		// ホワイトリストのチェックリスト表示（有効の場合）
-		if (this.plugin.settings.enableWhitelist) {
-			containerEl.createEl('h3', { text: 'Whitelist Files (Select allowed files)' });
-			let files: string[] = [];
-			try {
-				const realPath = fs.realpathSync(this.plugin.settings.serveDir);
-				files = this.listFilesRecursive(realPath, realPath);
-			} catch (err) {
-				console.error('フォルダー内のファイル一覧取得に失敗:', err);
-			}
-			files.forEach((file) => {
-				new Setting(containerEl)
-					.setName(file)
-					.addToggle(toggle =>
-						toggle
-							.setValue(this.plugin.settings.whitelistFiles.includes(file))
-							.onChange(async (value) => {
-								if (value) {
-									if (!this.plugin.settings.whitelistFiles.includes(file)) {
-										this.plugin.settings.whitelistFiles.push(file);
-									}
-								} else {
-									this.plugin.settings.whitelistFiles = this.plugin.settings.whitelistFiles.filter(f => f !== file);
-								}
-								await this.plugin.saveSettings();
-							})
-					);
-			});
-		}
+        this.plugin.settings.serverEntries.forEach((entry, index) => {
+            const entryEl = entryListEl.createDiv({ cls: 'local-server-entry' });
+            entryEl.style.border = '1px solid var(--background-modifier-border)';
+            entryEl.style.padding = '15px';
+            entryEl.style.marginBottom = '15px';
+            entryEl.style.borderRadius = 'var(--size-2-2)';
 
-		// 認証トークンの設定
-		new Setting(containerEl)
-			.setName('Authentication Token')
-			.setDesc('認証トークンを設定すると、リクエスト時に "Authorization: Bearer <token>" ヘッダーが必要になります。空欄の場合は認証なし。')
-			.addText(text =>
-				text
-					.setPlaceholder('Your token')
-					.setValue(this.plugin.settings.authToken)
-					.onChange(async (value) => {
-						this.plugin.settings.authToken = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
+            const entryHeader = new Setting(entryEl)
+                .setName(`Server #${index + 1}: ${entry.name || 'Unnamed'}`)
+                .setHeading()
+                .addExtraButton(button => {
+                    button.setIcon('trash');
+                    button.setTooltip('Remove this server entry');
+                    button.onClick(async () => {
+                        if (confirm(`サーバーエントリ "${entry.name || 'Unnamed'}" を削除してもよろしいですか？`)) {
+                             this.plugin.settings.serverEntries.splice(index, 1);
+                             await this.plugin.saveSettings(true);
+                             this.refreshDisplay();
+                        }
+                    });
+                });
+             entryHeader.settingEl.style.borderBottom = '1px solid var(--background-modifier-border)';
+             entryHeader.settingEl.style.marginBottom = '15px';
+
+             // 表示中のエントリのステータスを表示
+             const serverInfo = this.plugin.runningServers.get(entry.id);
+             if (serverInfo) {
+                  const statusEl = entryHeader.settingEl.createDiv({ cls: 'local-server-status' });
+                   statusEl.style.marginRight = '1em';
+                   statusEl.style.fontWeight = 'normal';
+                   statusEl.style.color = serverInfo.status === 'running' ? 'var(--color-success)' : 'var(--color-warning)'; // Obsidian colors
+                   statusEl.textContent = `Status: ${serverInfo.status}`;
+                   if (serverInfo.errorMessage) {
+                        statusEl.createSpan({ text: ` (Error: ${serverInfo.errorMessage})`, cls: 'local-server-error-message' }).style.color = 'var(--color-error)';
+                   } else if (serverInfo.status === 'running') {
+                        const protocol = serverInfo.entry.enableHttps ? 'https' : 'http';
+                        statusEl.createEl('a', { text: ` (${protocol}://${serverInfo.entry.host}:${serverInfo.entry.port})`, href: `${protocol}://${serverInfo.entry.host}:${serverInfo.entry.port}` }).style.color = 'var(--text-muted)';
+                   }
+             }
+
+
+             new Setting(entryEl)
+                .setName('Entry Name')
+                .setDesc('このサーバーエントリの識別名（設定画面表示用）')
+                .addText(text =>
+                    text
+                        .setPlaceholder('e.g., My Notes Server')
+                        .setValue(entry.name)
+                        .onChange(async (value: string) => {
+                            entry.name = value.trim();
+                            await this.plugin.saveSettings(false);
+                            entryHeader.setName(`Server #${index + 1}: ${entry.name || 'Unnamed'}`);
+                        })
+                );
+
+
+            new Setting(entryEl)
+                .setName('Host')
+                .setDesc('サーバーがリッスンするホスト名。通常は 127.0.0.1 (ローカルのみ) または 0.0.0.0 (LAN内など) を推奨します。')
+                .addText(text =>
+                    text
+                        .setPlaceholder('127.0.0.1')
+                        .setValue(entry.host)
+                        .onChange(async (value: string) => {
+                            const newHost = value.trim() || DEFAULT_SERVER_ENTRY.host;
+                            if (entry.host !== newHost) {
+                                if (newHost !== '127.0.0.1' && newHost !== 'localhost' && newHost !== '0.0.0.0') {
+                                    this.plugin.log('warn', `Entry "${entry.name}": ホストが ${newHost} に設定されています。セキュリティ上、127.0.0.1, localhost, または 0.0.0.0 の使用を推奨します。`, entry.name);
+                                    new Notice(`Server "${entry.name}": ホスト設定に注意`, 5000);
+                                }
+                                entry.host = newHost;
+                                await this.plugin.saveSettings(true);
+                            }
+                        })
+                );
+
+            new Setting(entryEl)
+                .setName('Port')
+                .setDesc('サーバーがリッスンするポート番号。')
+                .addText(text =>
+                    text
+                        .setPlaceholder('3000')
+                        .setValue(entry.port.toString())
+                        .onChange(async (value: string) => {
+                            const port = parseInt(value, 10);
+                            if (!isNaN(port) && port > 0 && port <= 65535) {
+                                if (entry.port !== port) {
+                                    entry.port = port;
+                                    await this.plugin.saveSettings(true);
+                                }
+                            } else {
+                                new Notice('無効なポート番号です。1から65535の間の数値を入力してください。');
+                                text.setValue(entry.port.toString());
+                            }
+                        })
+                );
+
+            new Setting(entryEl)
+                .setName('Serve Folder')
+                .setDesc('公開するフォルダのパス。Vaultルートからの相対パスまたは絶対パス。')
+                .addText(text => {
+                    text.setPlaceholder('e.g., public_html or /path/to/folder')
+                        .setValue(entry.serveDir)
+                        .onChange(async (value: string) => {
+                            const newDir = value.trim();
+                            if (entry.serveDir !== newDir) {
+                                entry.serveDir = newDir;
+                                await this.plugin.saveSettings(true);
+                                this.refreshDisplay();
+                            }
+                        });
+                    text.inputEl.style.width = '300px';
+                });
+
+		    entryEl.createEl('h4', { text: 'Security Settings (per entry)' });
+
+            new Setting(entryEl)
+                .setName('Enable HTTPS')
+                .setDesc('このエントリでHTTPSを有効にします。証明書/秘密鍵パスを指定してください。')
+                .addToggle(toggle =>
+                    toggle
+                        .setValue(entry.enableHttps)
+                        .onChange(async (value: boolean) => {
+                            if (entry.enableHttps !== value) {
+                                entry.enableHttps = value;
+                                await this.plugin.saveSettings(true);
+                                this.refreshDisplay();
+                            }
+                        })
+                );
+
+            if (entry.enableHttps) {
+                new Setting(entryEl)
+                    .setName('SSL Certificate File')
+                    .setDesc('SSL証明書ファイル (.pem, .crt) の絶対パス。')
+                    .addText(text =>
+                        text
+                            .setPlaceholder('/path/to/your/certificate.pem')
+                            .setValue(entry.sslCertPath)
+                            .onChange(async (value: string) => {
+                                const newPath = value.trim();
+                                if (entry.sslCertPath !== newPath) {
+                                    entry.sslCertPath = newPath;
+                                    await this.plugin.saveSettings(true);
+                                }
+                            })
+                    );
+
+                new Setting(entryEl)
+                    .setName('SSL Key File')
+                    .setDesc('SSL秘密鍵ファイル (.key, .pem) の絶対パス。')
+                    .addText(text =>
+                        text
+                            .setPlaceholder('/path/to/your/private.key')
+                            .setValue(entry.sslKeyPath)
+                            .onChange(async (value: string) => {
+                                const newPath = value.trim();
+                                if (entry.sslKeyPath !== newPath) {
+                                    entry.sslKeyPath = newPath;
+                                    await this.plugin.saveSettings(true);
+                                }
+						})
+                );
+            }
+
+            new Setting(entryEl)
+                .setName('Authentication Token')
+                .setDesc('オプション: このエントリへのアクセスにBearerトークン認証を要求します。空欄の場合は認証なし。')
+                .addText((text: TextComponent) => {
+                    text
+                        .setPlaceholder('Optional: your-secure-token')
+                        .setValue(entry.authToken)
+                        .onChange(async (value: string) => {
+                            if (entry.authToken !== value.trim()) {
+                                entry.authToken = value.trim();
+                                await this.plugin.saveSettings(false);
+                            }
+                        });
+                    text.inputEl.type = 'password';
+                });
+
+
+            entryEl.createEl('h4', { text: 'Whitelist Settings (per entry)' });
+
+            new Setting(entryEl)
+                .setName('Enable Whitelist')
+                .setDesc('有効にすると、公開フォルダ内のファイルのうち、以下で選択されたファイルのみアクセス可能になります。')
+                .addToggle(toggle =>
+                    toggle
+                        .setValue(entry.enableWhitelist)
+                        .onChange(async (value: boolean) => {
+                            if (entry.enableWhitelist !== value) {
+                                entry.enableWhitelist = value;
+                                await this.plugin.saveSettings(false, true);
+                                this.refreshDisplay();
+                            }
+                        })
+                );
+
+            const entryServedPath = this.plugin.resolveServedPath(entry);
+
+            if (entry.enableWhitelist && entryServedPath) {
+                const whitelistDesc = entryEl.createEl('p', { cls: 'setting-item-description' });
+                whitelistDesc.innerHTML = `公開フォルダ "${escapeHtml(entry.serveDir)}" (解決パス: <code>${escapeHtml(entryServedPath)}</code>) 内のファイルを選択します。チェックされたファイルのみアクセスが許可されます。`;
+                whitelistDesc.style.marginBottom = '1em';
+
+                let files: string[] = this.plugin.settingTabFileList.get(entry.id) || [];
+                if (files.length === 0) {
+                    files = this.listFilesRecursive(entryServedPath, entryServedPath);
+                    files.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+                    this.plugin.settingTabFileList.set(entry.id, files);
+                }
+
+
+                if (files.length === 0) {
+                    entryEl.createEl('p', { text: '指定されたディレクトリにファイルが見つかりません (隠しファイルやアクセス不能ファイルを除く)。', cls: 'setting-item-description' });
+                } else {
+                    const fileListContainer = entryEl.createDiv({cls: 'whitelist-file-list setting-item-control'});
+                    fileListContainer.style.maxHeight = '40vh';
+                    fileListContainer.style.overflowY = 'auto';
+                    fileListContainer.style.border = '1px solid var(--background-modifier-border)';
+                    fileListContainer.style.padding = '10px';
+                    fileListContainer.style.marginBottom = '1em';
+                    fileListContainer.style.marginLeft = 'var(--size-4-8)';
+
+                    files.forEach((file) => {
+                        const settingItem = createDiv({ cls: 'setting-item' });
+                        const infoDiv = createDiv({ cls: 'setting-item-info' });
+                        const nameDiv = createDiv({ cls: 'setting-item-name' });
+                        nameDiv.textContent = file;
+                        infoDiv.appendChild(nameDiv);
+                        settingItem.appendChild(infoDiv);
+
+                        const controlDiv = createDiv({ cls: 'setting-item-control' });
+                        new Setting(controlDiv)
+                            .addToggle(toggle =>
+                                toggle
+                                    .setValue(entry.whitelistFiles.includes(file))
+                                    .onChange(async (value: boolean) => {
+                                        const currentWhitelist = new Set(entry.whitelistFiles);
+                                        let changed = false;
+                                        if (value) {
+                                            if (!currentWhitelist.has(file)) {
+                                                currentWhitelist.add(file);
+                                                changed = true;
+                                            }
+                                        } else {
+                                            if (currentWhitelist.has(file)) {
+                                                currentWhitelist.delete(file);
+                                                changed = true;
+                                            }
+                                        }
+                                        if (changed) {
+                                            entry.whitelistFiles = Array.from(currentWhitelist);
+                                            await this.plugin.saveSettings(false, true);
+                                        }
+                                    })
+                            );
+                         settingItem.appendChild(controlDiv);
+                         fileListContainer.appendChild(settingItem);
+                    });
+                }
+            } else if (entry.enableWhitelist && !entryServedPath) {
+                 entryEl.createEl('p', { text: 'ホワイトリストを表示するには、有効な Serve Folder パスを設定してください。', cls: 'setting-item-description mod-warning' });
+            }
+
+        });
+
+        new Setting(containerEl)
+            .addButton(button => {
+                button.setButtonText('Add New Server Entry');
+                button.setCta();
+                button.onClick(async () => {
+                    // @ts-ignore // uuidv4 が undefined の可能性を無視
+                    const newId = typeof uuidv4 !== 'undefined' ? uuidv4() : `temp-${Date.now()}-${Math.random()}`;
+                    const newEntry: ServerEntrySettings = {
+                        ...DEFAULT_SERVER_ENTRY,
+                        id: newId,
+                        name: `New Server ${this.plugin.settings.serverEntries.length + 1}`,
+                        port: DEFAULT_SERVER_ENTRY.port + this.plugin.settings.serverEntries.length, // ポートをずらす (重複チェックはしない)
+                    };
+                    this.plugin.settings.serverEntries.push(newEntry);
+                    await this.plugin.saveSettings(false);
+                    this.refreshDisplay();
+                });
+            });
+
+
+        function escapeHtml(unsafe: string): string {
+             if (!unsafe) return '';
+             return unsafe
+                 .replace(/&/g, "&amp;")
+                 .replace(/</g, "&lt;")
+                 .replace(/>/g, "&gt;")
+                 .replace(/"/g, "&quot;")
+                 .replace(/'/g, "&#39;");
+         }
+
+        // *** Error 13 Correction ***
+        // Use type assertion for onOwnDetach
+        (this.containerEl as any).onOwnDetach(() => {
+             this.plugin.settingTabFileList.clear();
+        });
+        // *** End Correction ***
 	}
 }
