@@ -5,6 +5,7 @@
 import { App, Plugin, PluginSettingTab, Setting, Modal, Notice, DataAdapter, FileSystemAdapter, TextComponent, TFile } from 'obsidian';
 import * as http from 'http';
 import * as https from 'https';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 // @ts-ignore // uuid ライブラリが見つからない場合のエラーを無視
@@ -12,6 +13,19 @@ import { v4 as uuidv4 } from 'uuid'; // 各サーバーエントリにユニー�
 import { URL } from 'url';
 
 const MAX_LOG_ENTRIES = 300; // 保持するログの最大件数
+const INDEX_CACHE_TTL_MS = 8000; // インデックスの短期キャッシュ (ms)
+const DEFAULT_INDEX_EXTENSIONS = new Set([
+	'png',
+	'jpg',
+	'jpeg',
+	'webp',
+	'gif',
+	'bmp',
+	'svg',
+	'avif',
+	'tif',
+	'tiff',
+]);
 
 /**
  * 個々のサーバー設定用インターフェース
@@ -77,6 +91,40 @@ interface RunningServerInfo {
     errorMessage?: string; // エラーがある場合
 }
 
+/**
+ * 外部連携用 API
+ */
+interface LocalVaultServerApi {
+	apiVersion: number;
+	getServerEntries: () => ServerEntrySettings[];
+	getRunningServers: () => LocalVaultServerRunningInfo[];
+	onSettingsChanged: (handler: (settings: LocalServerPluginSettings) => void) => () => void;
+}
+
+interface LocalVaultServerRunningInfo {
+	id: string;
+	status: 'running' | 'error' | 'stopped';
+	baseUrl: string;
+	host: string;
+	port: number;
+	serveDir: string;
+	authToken: string;
+	enableHttps: boolean;
+}
+
+interface IndexCacheEntry {
+	etag: string;
+	createdAt: number;
+	payload: string;
+}
+
+interface IndexItem {
+	relativePath: string;
+	name: string;
+	size: number;
+	mtime: number;
+}
+
 
 export default class LocalServerPlugin extends Plugin {
 	settings: LocalServerPluginSettings;
@@ -86,6 +134,10 @@ export default class LocalServerPlugin extends Plugin {
 	settingTabFileList: Map<string, string[]> = new Map(); // entryId -> files list
 	/** ホワイトリスト用ファイル一覧の読み込み中フラグ */
 	settingTabFileListLoading: Set<string> = new Set();
+	/** 設定変更の通知先 */
+	private settingsListeners: Set<(settings: LocalServerPluginSettings) => void> = new Set();
+	/** インデックスの短期キャッシュ */
+	private indexCache: Map<string, IndexCacheEntry> = new Map();
 
 	// *** Error 2 & 5: Property 'statusBarItemEl' / 'logMessages' does not exist on type 'LocalServerPlugin'. ***
     // These properties ARE defined below. If the error persists, it's likely an environment issue.
@@ -172,6 +224,52 @@ export default class LocalServerPlugin extends Plugin {
 		this.settingTabFileList.clear();
 		this.settingTabFileListLoading.clear();
 		this.log('info', 'LocalServerPlugin unloaded.');
+	}
+
+	/**
+	 * 連携用 API を返す
+	 */
+	getApi(): LocalVaultServerApi {
+		return {
+			apiVersion: 1,
+			getServerEntries: () => this.settings.serverEntries.map((entry) => ({
+				...entry,
+				whitelistFiles: [...entry.whitelistFiles],
+			})),
+			getRunningServers: () =>
+				Array.from(this.runningServers.values()).map((info) => ({
+					id: info.entry.id,
+					status: info.status,
+					baseUrl: this.buildBaseUrl(info.entry),
+					host: info.entry.host,
+					port: info.entry.port,
+					serveDir: info.entry.serveDir,
+					authToken: info.entry.authToken,
+					enableHttps: info.entry.enableHttps,
+				})),
+			onSettingsChanged: (handler) => {
+				this.settingsListeners.add(handler);
+				return () => {
+					this.settingsListeners.delete(handler);
+				};
+			},
+		};
+	}
+
+	private notifySettingsChanged(): void {
+		for (const handler of this.settingsListeners) {
+			try {
+				handler(this.settings);
+			} catch (err: any) {
+				this.log('warn', `Settings listener error: ${err?.message ?? err}`);
+			}
+		}
+	}
+
+	private buildBaseUrl(entry: ServerEntrySettings): string {
+		const protocol = entry.enableHttps ? 'https' : 'http';
+		const host = entry.host === '0.0.0.0' ? '127.0.0.1' : entry.host;
+		return `${protocol}://${host}:${entry.port}`;
 	}
 
 	log(type: 'info' | 'warn' | 'error', message: string, entryName?: string, ...optionalParams: any[]) {
@@ -608,6 +706,19 @@ export default class LocalServerPlugin extends Plugin {
 
             const safePathname = path.posix.normalize('/' + pathname).replace(/^(\.\.[\/\\])+/, '');
             const cleanPathname = safePathname.replace(/\0/g, '');
+			if (cleanPathname === '/__index.json') {
+				void this.handleIndexRequest(
+					res,
+					entry,
+					servedRealPath,
+					new URL(req.url, baseUrl).searchParams,
+					startTime,
+					req.method,
+					req.url,
+					req.headers['if-none-match']
+				);
+				return;
+			}
 			const requestedPath = path.join(servedRealPath, cleanPathname);
 
 			fs.realpath(requestedPath, (err, resolvedPath) => {
@@ -684,6 +795,219 @@ export default class LocalServerPlugin extends Plugin {
 			}
 			this.logRequest(startTime, statusCode, entry.name, req.method, req.url);
 		}
+	}
+
+	private async handleIndexRequest(
+		res: http.ServerResponse,
+		entry: ServerEntrySettings,
+		servedRealPath: string,
+		searchParams: URLSearchParams,
+		startTime: number,
+		method?: string,
+		url?: string,
+		ifNoneMatch?: string | string[]
+	): Promise<void> {
+		const extensions = this.parseIndexExtensions(searchParams.get('ext'));
+		const recursive = searchParams.get('recursive') !== '0';
+		const rawPath = searchParams.get('path') ?? '';
+		const relativePath = this.normalizeIndexPath(rawPath);
+
+		const resolvedDir = await this.resolveIndexDirectory(servedRealPath, relativePath);
+		if (!resolvedDir) {
+			this.sendResponse(res, 404, 'Not Found', startTime, entry.name, method, url, relativePath);
+			return;
+		}
+
+		const whitelistSet = entry.enableWhitelist
+			? this.normalizeWhitelist(entry.whitelistFiles)
+			: null;
+
+		const cacheKey = this.buildIndexCacheKey(entry, relativePath, extensions, recursive);
+		const cached = this.indexCache.get(cacheKey);
+		const now = Date.now();
+		const etagHeader = Array.isArray(ifNoneMatch) ? ifNoneMatch.join(',') : ifNoneMatch ?? '';
+
+		if (cached && now - cached.createdAt <= INDEX_CACHE_TTL_MS) {
+			res.setHeader('Content-Type', 'application/json; charset=utf-8');
+			res.setHeader('Cache-Control', `private, max-age=${Math.floor(INDEX_CACHE_TTL_MS / 1000)}`);
+			res.setHeader('ETag', cached.etag);
+
+			if (etagHeader && etagHeader.includes(cached.etag)) {
+				res.statusCode = 304;
+				res.end();
+				this.logRequest(startTime, 304, entry.name, method, url, relativePath);
+				return;
+			}
+
+			res.statusCode = 200;
+			if (method !== 'HEAD') {
+				res.end(cached.payload);
+			} else {
+				res.end();
+			}
+			this.logRequest(startTime, 200, entry.name, method, url, relativePath);
+			return;
+		}
+
+		const itemsResult = await this.collectIndexItems(
+			resolvedDir,
+			servedRealPath,
+			extensions,
+			recursive,
+			whitelistSet
+		);
+
+		if (itemsResult.errorMessage) {
+			this.sendResponse(res, 500, itemsResult.errorMessage, startTime, entry.name, method, url, relativePath);
+			return;
+		}
+
+		const payload = JSON.stringify({
+			basePath: relativePath,
+			items: itemsResult.items,
+			generatedAt: new Date().toISOString(),
+		});
+
+		const etag = itemsResult.etag;
+		this.indexCache.set(cacheKey, { etag, createdAt: now, payload });
+
+		res.setHeader('Content-Type', 'application/json; charset=utf-8');
+		res.setHeader('Cache-Control', `private, max-age=${Math.floor(INDEX_CACHE_TTL_MS / 1000)}`);
+		res.setHeader('ETag', etag);
+		res.statusCode = 200;
+		if (method !== 'HEAD') {
+			res.end(payload);
+		} else {
+			res.end();
+		}
+		this.logRequest(startTime, 200, entry.name, method, url, relativePath);
+	}
+
+	private parseIndexExtensions(value: string | null): Set<string> {
+		if (!value) {
+			return new Set(DEFAULT_INDEX_EXTENSIONS);
+		}
+		const items = value
+			.split(',')
+			.map((item) => item.trim().toLowerCase().replace(/^\./, ''))
+			.filter((item) => item.length > 0);
+		if (items.length === 0) {
+			return new Set(DEFAULT_INDEX_EXTENSIONS);
+		}
+		return new Set(items);
+	}
+
+	private normalizeIndexPath(value: string): string {
+		const normalized = path.posix.normalize(`/${value}`).replace(/^\/+/, '');
+		if (normalized === '.' || normalized === '/') {
+			return '';
+		}
+		return normalized;
+	}
+
+	private async resolveIndexDirectory(servedRealPath: string, relativePath: string): Promise<string | null> {
+		try {
+			const targetPath = path.join(servedRealPath, relativePath);
+			const resolved = await fs.promises.realpath(targetPath);
+			if (!this.isPathInside(servedRealPath, resolved)) {
+				return null;
+			}
+			const stats = await fs.promises.stat(resolved);
+			if (!stats.isDirectory()) {
+				return null;
+			}
+			return resolved;
+		} catch {
+			return null;
+		}
+	}
+
+	private normalizeWhitelist(values: string[]): Set<string> {
+		return new Set(values.map((value) => value.split(path.sep).join(path.posix.sep)));
+	}
+
+	private buildIndexCacheKey(
+		entry: ServerEntrySettings,
+		relativePath: string,
+		extensions: Set<string>,
+		recursive: boolean
+	): string {
+		const extensionKey = Array.from(extensions).sort().join(',');
+		const whitelistKey = entry.enableWhitelist
+			? crypto.createHash('sha1').update(entry.whitelistFiles.join('|')).digest('hex')
+			: 'all';
+		return `${entry.id}|${relativePath}|${recursive ? 'r' : 'n'}|${extensionKey}|${whitelistKey}`;
+	}
+
+	private async collectIndexItems(
+		dirPath: string,
+		servedRealPath: string,
+		extensions: Set<string>,
+		recursive: boolean,
+		whitelistSet: Set<string> | null
+	): Promise<{ items: IndexItem[]; etag: string; errorMessage: string }> {
+		const items: IndexItem[] = [];
+		const hash = crypto.createHash('sha1');
+		const stack = [dirPath];
+
+		while (stack.length > 0) {
+			const current = stack.pop();
+			if (!current) {
+				continue;
+			}
+
+			let dirents: fs.Dirent[];
+			try {
+				dirents = await fs.promises.readdir(current, { withFileTypes: true });
+			} catch (err: any) {
+				return { items: [], etag: '', errorMessage: `Failed to read directory: ${err?.message ?? err}` };
+			}
+
+			for (const dirent of dirents) {
+				const fullPath = path.join(current, dirent.name);
+				if (dirent.isDirectory()) {
+					if (recursive) {
+						stack.push(fullPath);
+					}
+					continue;
+				}
+				if (!dirent.isFile()) {
+					continue;
+				}
+
+				const ext = path.extname(dirent.name).toLowerCase().replace('.', '');
+				if (!extensions.has(ext)) {
+					continue;
+				}
+
+				let stats: fs.Stats;
+				try {
+					stats = await fs.promises.stat(fullPath);
+				} catch {
+					continue;
+				}
+
+				const relativeOs = path.relative(servedRealPath, fullPath);
+				const relativePath = relativeOs.split(path.sep).join(path.posix.sep);
+				if (whitelistSet && !whitelistSet.has(relativePath)) {
+					continue;
+				}
+
+				items.push({
+					relativePath,
+					name: dirent.name,
+					size: stats.size,
+					mtime: stats.mtimeMs,
+				});
+
+				hash.update(relativePath);
+				hash.update(String(stats.size));
+				hash.update(String(stats.mtimeMs));
+			}
+		}
+
+		items.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+		return { items, etag: hash.digest('hex'), errorMessage: '' };
 	}
 
 	private sendResponse(
@@ -928,6 +1252,7 @@ export default class LocalServerPlugin extends Plugin {
         // 設定オブジェクト自体は参照渡しなので、直接変更されている
         // 変更をファイルに保存
 		await this.saveData(this.settings);
+		this.indexCache.clear();
 
         // サーバー設定の変更があった場合は、すべてのサーバーを再起動
 		if (triggerServerReload) {
@@ -939,6 +1264,8 @@ export default class LocalServerPlugin extends Plugin {
         } else {
              this.log('info', 'Settings updated (no server restart needed).');
         }
+
+		this.notifySettingsChanged();
 	}
 }
 
