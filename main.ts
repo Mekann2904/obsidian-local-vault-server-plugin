@@ -820,7 +820,17 @@ export default class LocalServerPlugin extends Plugin {
 							this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url, cleanPathname);
 							return;
 						}
-						this.serveFile(res, resolvedPath, stats, entry.name, startTime, req.method, req.url);
+						this.serveFile(
+							res,
+							resolvedPath,
+							stats,
+							entry.name,
+							startTime,
+							req.method,
+							req.url,
+							req.headers['if-none-match'],
+							req.headers['if-modified-since']
+						);
 					} else {
 						statusCode = 403;
 						this.sendResponse(res, statusCode, 'Forbidden: Not a file or directory.', startTime, entry.name, req.method, req.url, cleanPathname);
@@ -1091,6 +1101,25 @@ export default class LocalServerPlugin extends Plugin {
         }
 	}
 
+	private buildWhitelistDirectorySet(whitelistFiles: string[]): Set<string> {
+		// 1回のディレクトリ表示で O(n*m) を避けるため、親ディレクトリ集合を作る
+		const directories = new Set<string>();
+
+		for (const filePath of whitelistFiles) {
+			const parts = filePath.split(path.sep).filter(Boolean);
+			if (parts.length <= 1) {
+				continue;
+			}
+
+			for (let i = 1; i < parts.length; i++) {
+				const dirPath = parts.slice(0, i).join(path.sep);
+				directories.add(dirPath);
+			}
+		}
+
+		return directories;
+	}
+
     private serveDirectoryListing(
         res: http.ServerResponse,
         dirPath: string,
@@ -1103,6 +1132,9 @@ export default class LocalServerPlugin extends Plugin {
         method?: string,
         url?: string
     ) {
+		const whitelistSet = enableWhitelist ? new Set(whitelistFiles) : null;
+		const whitelistDirSet = enableWhitelist ? this.buildWhitelistDirectorySet(whitelistFiles) : null;
+
 		fs.readdir(dirPath, { withFileTypes: true }, (err, files) => {
 			if (err) {
 				this.sendResponse(res, 500, 'Internal Server Error: Could not read directory', startTime, entryName, method, url, pathname);
@@ -1165,14 +1197,14 @@ export default class LocalServerPlugin extends Plugin {
                 let iconClass = isDir ? 'dir' : 'file';
 
                 let allow = true;
-                 if (enableWhitelist) {
+                 if (enableWhitelist && whitelistSet && whitelistDirSet) {
                     const currentEntryPath = path.join(dirPath, file.name);
                     const relativePath = path.relative(servedRealPath, currentEntryPath);
 
                     if (isDir) {
-                         allow = whitelistFiles.some(f => f === relativePath || (f.startsWith(relativePath + path.sep) && f !== relativePath));
+                         allow = whitelistSet.has(relativePath) || whitelistDirSet.has(relativePath);
                     } else {
-                         allow = whitelistFiles.includes(relativePath);
+                         allow = whitelistSet.has(relativePath);
                     }
                  }
 
@@ -1187,7 +1219,7 @@ export default class LocalServerPlugin extends Plugin {
 </body>
 </html>`);
 			res.end();
-			this.logRequest(startTime, 200, entryName, method, url, pathname);
+            this.logRequest(startTime, 200, entryName, method, url, pathname);
 		});
 	}
 
@@ -1198,17 +1230,56 @@ export default class LocalServerPlugin extends Plugin {
         entryName: string,
         startTime: number,
         method?: string,
-        url?: string
+        url?: string,
+		ifNoneMatch?: string | string[],
+		ifModifiedSince?: string | string[]
     ) {
+		const contentType = this.getContentType(filePath);
+		const etag = this.buildFileEtag(stats);
+		const lastModified = stats.mtime.toUTCString();
+		const requestMethod = (method ?? 'GET').toUpperCase();
+		const ifNoneMatchHeader = Array.isArray(ifNoneMatch) ? ifNoneMatch.join(',') : ifNoneMatch ?? '';
+		const ifModifiedSinceHeader = Array.isArray(ifModifiedSince) ? ifModifiedSince[0] : ifModifiedSince;
+
+		// 条件付きリクエストは I/O を避けて 304 を返す
+		if (ifNoneMatchHeader && ifNoneMatchHeader.includes(etag)) {
+			res.writeHead(304, { 'ETag': etag, 'Last-Modified': lastModified });
+			res.end();
+			this.logRequest(startTime, 304, entryName, method, url, filePath);
+			return;
+		}
+
+		if (ifModifiedSinceHeader) {
+			const since = Date.parse(ifModifiedSinceHeader);
+			if (!Number.isNaN(since) && stats.mtimeMs <= since) {
+				res.writeHead(304, { 'ETag': etag, 'Last-Modified': lastModified });
+				res.end();
+				this.logRequest(startTime, 304, entryName, method, url, filePath);
+				return;
+			}
+		}
+
+		if (requestMethod === 'HEAD') {
+			res.writeHead(200, {
+				'Content-Type': contentType,
+				'Content-Length': stats.size,
+				'Last-Modified': lastModified,
+				'ETag': etag,
+			});
+			res.end();
+			this.logRequest(startTime, 200, entryName, method, url, filePath);
+			return;
+		}
+
 		const stream = fs.createReadStream(filePath);
 		let statusCode = 200;
 
 		stream.on('open', () => {
-			const contentType = this.getContentType(filePath);
 			res.writeHead(statusCode, {
 				'Content-Type': contentType,
 				'Content-Length': stats.size,
-                'Last-Modified': stats.mtime.toUTCString()
+                'Last-Modified': lastModified,
+				'ETag': etag
 			});
 			stream.pipe(res);
             stream.on('end', () => {
@@ -1298,6 +1369,11 @@ export default class LocalServerPlugin extends Plugin {
             case '.wasm': return 'application/wasm';
 			default: return 'application/octet-stream';
 		}
+	}
+
+	private buildFileEtag(stats: fs.Stats): string {
+		// ファイル更新の検出に十分な軽量 ETag
+		return `W/"${stats.size}-${stats.mtimeMs}"`;
 	}
 
 		async loadSettings() {
