@@ -110,6 +110,10 @@ export default class LocalServerPlugin extends Plugin {
 
 		this.log('info', 'LocalServerPlugin loading...');
 		await this.loadSettings();
+		const idsChanged = this.ensureUniqueEntryIds();
+		if (idsChanged) {
+			await this.saveSettings(false, false);
+		}
 
         // 設定のマイグレーション（古い単一設定から新しい複数設定へ）
         if (!Array.isArray(this.settings.serverEntries) || this.settings.serverEntries.length === 0) {
@@ -232,7 +236,8 @@ export default class LocalServerPlugin extends Plugin {
 	private normalizeServerEntry(raw: Partial<ServerEntrySettings>): ServerEntrySettings {
 		const entry = raw ?? {};
 		const parsedPort = typeof entry.port === 'string' ? Number.parseInt(entry.port, 10) : entry.port;
-		const port = Number.isFinite(parsedPort) ? (parsedPort as number) : DEFAULT_SERVER_ENTRY.port;
+		const normalizedPort = Number.isFinite(parsedPort) ? (parsedPort as number) : DEFAULT_SERVER_ENTRY.port;
+		const port = (normalizedPort >= 1 && normalizedPort <= 65535) ? normalizedPort : DEFAULT_SERVER_ENTRY.port;
 		const whitelistFiles = Array.isArray(entry.whitelistFiles)
 			? entry.whitelistFiles.filter((value) => typeof value === 'string')
 			: [];
@@ -250,6 +255,33 @@ export default class LocalServerPlugin extends Plugin {
 			sslCertPath: typeof entry.sslCertPath === 'string' ? entry.sslCertPath : DEFAULT_SERVER_ENTRY.sslCertPath,
 			sslKeyPath: typeof entry.sslKeyPath === 'string' ? entry.sslKeyPath : DEFAULT_SERVER_ENTRY.sslKeyPath,
 		};
+	}
+
+	// ID の欠落や重複を解消する
+	private ensureUniqueEntryIds(): boolean {
+		const seen = new Set<string>();
+		let changed = false;
+
+		for (const entry of this.settings.serverEntries) {
+			let id = (typeof entry.id === 'string') ? entry.id.trim() : '';
+			if (!id || seen.has(id)) {
+				let newId = '';
+				do {
+					newId = (typeof uuidv4 === 'function')
+						? uuidv4()
+						: `temp-${Date.now()}-${Math.random()}`;
+				} while (seen.has(newId));
+				entry.id = newId;
+				changed = true;
+				if (typeof uuidv4 !== 'function') {
+					this.log('warn', `UUID library not available, using temporary ID "${newId}" for entry "${entry.name}".`, entry.name);
+				}
+				id = newId;
+			}
+			seen.add(id);
+		}
+
+		return changed;
 	}
 
 	// child が parent 配下かどうかを判定する
@@ -311,6 +343,10 @@ export default class LocalServerPlugin extends Plugin {
 
 	async startAllServers() {
 		await this.stopAllServers(); // 既存のサーバーをすべて停止
+		const idsChanged = this.ensureUniqueEntryIds();
+		if (idsChanged) {
+			await this.saveSettings(false, false);
+		}
 
 		this.runningServers.clear(); // マップをクリア
 
@@ -323,9 +359,9 @@ export default class LocalServerPlugin extends Plugin {
 		for (const entry of this.settings.serverEntries) {
             // ID がないエントリがあれば生成
             // @ts-ignore // uuidv4 が undefined の可能性を無視
-            if (!entry.id || typeof uuidv4 === 'undefined') {
-                 entry.id = typeof uuidv4 !== 'undefined' ? uuidv4() : `temp-${Date.now()}-${Math.random()}`; // uuid なければ仮ID
-                 if (typeof uuidv4 === 'undefined') {
+            if (!entry.id) {
+                 entry.id = typeof uuidv4 === 'function' ? uuidv4() : `temp-${Date.now()}-${Math.random()}`; // uuid なければ仮ID
+                 if (typeof uuidv4 !== 'function') {
                      this.log('warn', `UUID library not available, using temporary ID "${entry.id}" for entry "${entry.name}". Install uuid for stable IDs.`, entry.name);
                  } else {
                      this.log('warn', `Assigned new ID "${entry.id}" to server entry "${entry.name}".`, entry.name);
@@ -525,6 +561,13 @@ export default class LocalServerPlugin extends Plugin {
 				this.sendResponse(res, statusCode, 'Bad Request', startTime, entry.name, req.method, req.url);
 				return;
 			}
+			const method = req.method.toUpperCase();
+			if (method !== 'GET' && method !== 'HEAD') {
+				statusCode = 405;
+				res.setHeader('Allow', 'GET, HEAD');
+				this.sendResponse(res, statusCode, 'Method Not Allowed', startTime, entry.name, req.method, req.url);
+				return;
+			}
             const hostHeader = req.headers['host'] || `${entry.host}:${entry.port}`;
 			const protocol = entry.enableHttps ? 'https' : 'http';
 			const baseUrl = `${protocol}://${hostHeader}`;
@@ -580,21 +623,33 @@ export default class LocalServerPlugin extends Plugin {
 					return;
 				}
 
-				if (entry.enableWhitelist) {
-					const relativePath = path.relative(servedRealPath, resolvedPath);
-					if (!entry.whitelistFiles.includes(relativePath)) {
-						statusCode = 403;
-						this.sendResponse(res, statusCode, 'Forbidden: File not whitelisted.', startTime, entry.name, req.method, req.url, cleanPathname);
-						return;
-					}
-				}
-
 				fs.stat(resolvedPath, (statErr, stats) => {
 					if (statErr) {
 						statusCode = (statErr.code === 'ENOENT' ? 404 : 500);
                         this.log('error', `Error stating file ${resolvedPath} for entry "${entry.name}": ${statErr.message}`, entry.name, statErr);
 						this.sendResponse(res, statusCode, statusCode === 404 ? 'Not Found' : 'Internal Server Error', startTime, entry.name, req.method, req.url, cleanPathname);
 						return;
+					}
+
+					if (entry.enableWhitelist) {
+						const relativePath = path.relative(servedRealPath, resolvedPath);
+						if (stats.isDirectory()) {
+							const hasAny = entry.whitelistFiles.length > 0;
+							const hasMatch = entry.whitelistFiles.some((file) =>
+								file === relativePath || file.startsWith(relativePath + path.sep)
+							);
+							if (!(hasMatch || (relativePath === '' && hasAny))) {
+								statusCode = 403;
+								this.sendResponse(res, statusCode, 'Forbidden: Directory not whitelisted.', startTime, entry.name, req.method, req.url, cleanPathname);
+								return;
+							}
+						} else if (stats.isFile()) {
+							if (!entry.whitelistFiles.includes(relativePath)) {
+								statusCode = 403;
+								this.sendResponse(res, statusCode, 'Forbidden: File not whitelisted.', startTime, entry.name, req.method, req.url, cleanPathname);
+								return;
+							}
+						}
 					}
 
 					if (stats.isDirectory()) {
