@@ -1,3 +1,7 @@
+// Path: main.ts
+// Role: Obsidian 内でローカルファイル配信サーバーを管理するプラグイン本体
+// Why: Vault 内のファイルを安全に配信し、設定 UI とログ表示を提供するため
+// Related: manifest.json, README.md, styles.css, main.js
 import { App, Plugin, PluginSettingTab, Setting, Modal, Notice, DataAdapter, FileSystemAdapter, TextComponent } from 'obsidian';
 import * as http from 'http';
 import * as https from 'https';
@@ -80,6 +84,8 @@ export default class LocalServerPlugin extends Plugin {
 	runningServers: Map<string, RunningServerInfo> = new Map();
 	/** 設定画面で表示中のファイルリスト（ホワイトリスト用） */
 	settingTabFileList: Map<string, string[]> = new Map(); // entryId -> files list
+	/** ホワイトリスト用ファイル一覧の読み込み中フラグ */
+	settingTabFileListLoading: Set<string> = new Set();
 
 	// *** Error 2 & 5: Property 'statusBarItemEl' / 'logMessages' does not exist on type 'LocalServerPlugin'. ***
     // These properties ARE defined below. If the error persists, it's likely an environment issue.
@@ -213,20 +219,64 @@ export default class LocalServerPlugin extends Plugin {
         }
 	}
 
+	// ディスクから読み込んだ設定を安全に正規化する
+	private normalizeSettings(raw: unknown): LocalServerPluginSettings {
+		const data = (raw && typeof raw === 'object') ? (raw as any) : {};
+		const entries = Array.isArray(data.serverEntries) ? data.serverEntries : [];
+		return {
+			serverEntries: entries.map((entry: Partial<ServerEntrySettings>) => this.normalizeServerEntry(entry)),
+		};
+	}
+
+	// サーバーエントリの型と初期値を保証する
+	private normalizeServerEntry(raw: Partial<ServerEntrySettings>): ServerEntrySettings {
+		const entry = raw ?? {};
+		const parsedPort = typeof entry.port === 'string' ? Number.parseInt(entry.port, 10) : entry.port;
+		const port = Number.isFinite(parsedPort) ? (parsedPort as number) : DEFAULT_SERVER_ENTRY.port;
+		const whitelistFiles = Array.isArray(entry.whitelistFiles)
+			? entry.whitelistFiles.filter((value) => typeof value === 'string')
+			: [];
+
+		return {
+			id: (typeof entry.id === 'string' && entry.id.trim()) ? entry.id : DEFAULT_SERVER_ENTRY.id,
+			name: (typeof entry.name === 'string' && entry.name.trim()) ? entry.name.trim() : DEFAULT_SERVER_ENTRY.name,
+			host: (typeof entry.host === 'string' && entry.host.trim()) ? entry.host.trim() : DEFAULT_SERVER_ENTRY.host,
+			port,
+			serveDir: typeof entry.serveDir === 'string' ? entry.serveDir : DEFAULT_SERVER_ENTRY.serveDir,
+			enableWhitelist: typeof entry.enableWhitelist === 'boolean' ? entry.enableWhitelist : DEFAULT_SERVER_ENTRY.enableWhitelist,
+			whitelistFiles,
+			authToken: typeof entry.authToken === 'string' ? entry.authToken : DEFAULT_SERVER_ENTRY.authToken,
+			enableHttps: typeof entry.enableHttps === 'boolean' ? entry.enableHttps : DEFAULT_SERVER_ENTRY.enableHttps,
+			sslCertPath: typeof entry.sslCertPath === 'string' ? entry.sslCertPath : DEFAULT_SERVER_ENTRY.sslCertPath,
+			sslKeyPath: typeof entry.sslKeyPath === 'string' ? entry.sslKeyPath : DEFAULT_SERVER_ENTRY.sslKeyPath,
+		};
+	}
+
+	// child が parent 配下かどうかを判定する
+	isPathInside(parent: string, child: string): boolean {
+		const relative = path.relative(parent, child);
+		if (!relative) return true;
+		return !relative.startsWith('..') && !path.isAbsolute(relative);
+	}
+
 	resolveServedPath(entry: ServerEntrySettings): string | null {
         if (!entry.serveDir) {
             return null;
         }
         try {
             let potentialPath = entry.serveDir;
-            if (!path.isAbsolute(potentialPath)) {
+            const isRelative = !path.isAbsolute(potentialPath);
+            let baseRealPath: string | null = null;
+            if (isRelative) {
                 const adapter = this.app.vault.adapter;
                 const basePath = adapter && typeof (adapter as any).getBasePath === 'function'
                     ? (adapter as any).getBasePath()
                     : null;
 
                 if (basePath) {
-                    potentialPath = path.join(basePath, entry.serveDir);
+                    // Vault ルートの実パスを取得してから結合する
+                    baseRealPath = fs.realpathSync(basePath);
+                    potentialPath = path.join(baseRealPath, entry.serveDir);
                 } else {
                     this.log('error', `Cannot resolve relative path "${entry.serveDir}" for entry "${entry.name}". Vault adapter base path not available.`, entry.name);
                     return null;
@@ -239,6 +289,12 @@ export default class LocalServerPlugin extends Plugin {
                 return null;
             }
             const realPath = fs.realpathSync(normalizedPotentialPath);
+
+            // 相対パスの場合は Vault 配下のみ許可する
+            if (isRelative && baseRealPath && !this.isPathInside(baseRealPath, realPath)) {
+                this.log('error', `Serve path "${realPath}" escapes vault root for entry "${entry.name}".`, entry.name);
+                return null;
+            }
 
             if (!fs.statSync(realPath).isDirectory()) {
                  this.log('error', `Resolved serve path "${realPath}" for entry "${entry.name}" is not a directory.`, entry.name);
@@ -335,6 +391,8 @@ export default class LocalServerPlugin extends Plugin {
 
                 // サーバーインスタンスにエントリIDを紐づける
                 (server as any).__entryId = entry.id;
+				// エラー発生前に状態を登録する
+				this.runningServers.set(entry.id, { server, entry, servedRealPath, status: 'stopped' });
 
 				server.on('error', (err: NodeJS.ErrnoException) => {
                     let errorMessage = `Server error for "${entry.name}" (${entry.host}:${entry.port}): ${err.message} (Code: ${err.code})`;
@@ -805,8 +863,9 @@ export default class LocalServerPlugin extends Plugin {
 		}
 	}
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		async loadSettings() {
+		const raw = await this.loadData();
+		this.settings = this.normalizeSettings(raw);
 	}
 
 	async saveSettings(triggerServerReload: boolean = false, triggerWhitelistUpdate: boolean = false) {
@@ -858,7 +917,8 @@ class LogModal extends Modal {
 				logEntry.createSpan({ cls: 'log-timestamp', text: log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) });
                 // *** End of Error 6-7 consideration ***
                 const messageSpan = logEntry.createSpan({ cls: 'log-message' });
-                messageSpan.innerHTML = log.message.replace(/\n/g, '<br>');
+                // HTML をそのまま挿入せず、文字列として表示する
+                messageSpan.textContent = log.message;
 			});
 		}
 
@@ -890,42 +950,48 @@ class LocalServerSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-    private listFilesRecursive(dir: string, baseDir: string): string[] {
-		let results: string[] = [];
-		try {
-			const list = fs.readdirSync(dir, { withFileTypes: true });
-			list.forEach(dirent => {
-                if (dirent.name.startsWith('.') || dirent.name === 'node_modules' || dirent.name === '@trash') {
-                    return;
-                }
-				const fullPath = path.join(dir, dirent.name);
-				if (dirent.isDirectory()) {
-					results = results.concat(this.listFilesRecursive(fullPath, baseDir));
-				} else if (dirent.isFile()){
-					results.push(path.relative(baseDir, fullPath));
-				} else if (dirent.isSymbolicLink()) {
-                    try {
-                        const linkRealPath = fs.realpathSync(fullPath);
-                        if (linkRealPath.startsWith(baseDir)) {
-                             const linkStat = fs.statSync(linkRealPath);
-                             if (linkStat.isFile()) {
-                                 results.push(path.relative(baseDir, fullPath));
-                             }
-                        } else {
-                            // this.plugin.log('debug', `Symbolic link "${fullPath}" points outside served directory. Ignoring.`);
-                        }
-                    } catch (linkErr: any) {
-                         // this.plugin.log('debug', `Could not resolve symbolic link "${fullPath}": ${linkErr.message}. Ignoring.`);
-                    }
-                }
-			});
-		} catch (err: any) {
-            if (err.code === 'EACCES' || err.code === 'EPERM') {
-                 this.plugin.log('warn', `Permission denied while listing files in ${dir}. Skipping.`);
-            } else {
-			    this.plugin.log('error', `Error listing files in ${dir}: ${err.message}`);
-            }
+    private async listFilesRecursive(dir: string, baseDir: string): Promise<string[]> {
+		const results: string[] = [];
+		const stack: string[] = [dir];
+
+		while (stack.length > 0) {
+			const currentDir = stack.pop();
+			if (!currentDir) continue;
+
+			try {
+				const list = await fs.promises.readdir(currentDir, { withFileTypes: true });
+				for (const dirent of list) {
+					if (dirent.name.startsWith('.') || dirent.name === 'node_modules' || dirent.name === '@trash') {
+						continue;
+					}
+					const fullPath = path.join(currentDir, dirent.name);
+					if (dirent.isDirectory()) {
+						stack.push(fullPath);
+					} else if (dirent.isFile()) {
+						results.push(path.relative(baseDir, fullPath));
+					} else if (dirent.isSymbolicLink()) {
+						try {
+							const linkRealPath = await fs.promises.realpath(fullPath);
+							if (this.plugin.isPathInside(baseDir, linkRealPath)) {
+								const linkStat = await fs.promises.stat(linkRealPath);
+								if (linkStat.isFile()) {
+									results.push(path.relative(baseDir, fullPath));
+								}
+							}
+						} catch (linkErr: any) {
+							// 無効なリンクは無視する
+						}
+					}
+				}
+			} catch (err: any) {
+				if (err.code === 'EACCES' || err.code === 'EPERM') {
+					this.plugin.log('warn', `Permission denied while listing files in ${currentDir}. Skipping.`);
+				} else {
+					this.plugin.log('error', `Error listing files in ${currentDir}: ${err.message}`);
+				}
+			}
 		}
+
 		return results;
 	}
 
@@ -967,6 +1033,8 @@ class LocalServerSettingTab extends PluginSettingTab {
                     button.setTooltip('Remove this server entry');
                     button.onClick(async () => {
                         if (confirm(`サーバーエントリ "${entry.name || 'Unnamed'}" を削除してもよろしいですか？`)) {
+                             this.plugin.settingTabFileList.delete(entry.id);
+                             this.plugin.settingTabFileListLoading.delete(entry.id);
                              this.plugin.settings.serverEntries.splice(index, 1);
                              await this.plugin.saveSettings(true);
                              this.refreshDisplay();
@@ -1059,6 +1127,8 @@ class LocalServerSettingTab extends PluginSettingTab {
                             const newDir = value.trim();
                             if (entry.serveDir !== newDir) {
                                 entry.serveDir = newDir;
+                                this.plugin.settingTabFileList.delete(entry.id);
+                                this.plugin.settingTabFileListLoading.delete(entry.id);
                                 await this.plugin.saveSettings(true);
                                 this.refreshDisplay();
                             }
@@ -1158,15 +1228,29 @@ class LocalServerSettingTab extends PluginSettingTab {
                 whitelistDesc.innerHTML = `公開フォルダ "${escapeHtml(entry.serveDir)}" (解決パス: <code>${escapeHtml(entryServedPath)}</code>) 内のファイルを選択します。チェックされたファイルのみアクセスが許可されます。`;
                 whitelistDesc.style.marginBottom = '1em';
 
-                let files: string[] = this.plugin.settingTabFileList.get(entry.id) || [];
-                if (files.length === 0) {
-                    files = this.listFilesRecursive(entryServedPath, entryServedPath);
-                    files.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-                    this.plugin.settingTabFileList.set(entry.id, files);
+                const hasCache = this.plugin.settingTabFileList.has(entry.id);
+                const cachedFiles = this.plugin.settingTabFileList.get(entry.id) ?? [];
+
+                if (!hasCache) {
+                    entryEl.createEl('p', { text: 'ファイル一覧を読み込み中...', cls: 'setting-item-description' });
+                    if (!this.plugin.settingTabFileListLoading.has(entry.id)) {
+                        this.plugin.settingTabFileListLoading.add(entry.id);
+                        void this.listFilesRecursive(entryServedPath, entryServedPath).then((files) => {
+                            files.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+                            this.plugin.settingTabFileList.set(entry.id, files);
+                            this.plugin.settingTabFileListLoading.delete(entry.id);
+                            this.refreshDisplay();
+                        }).catch((err: any) => {
+                            this.plugin.log('error', `Failed to list files for whitelist: ${err?.message ?? err}`);
+                            this.plugin.settingTabFileListLoading.delete(entry.id);
+                            this.plugin.settingTabFileList.set(entry.id, []);
+                            this.refreshDisplay();
+                        });
+                    }
+                    return;
                 }
 
-
-                if (files.length === 0) {
+                if (cachedFiles.length === 0) {
                     entryEl.createEl('p', { text: '指定されたディレクトリにファイルが見つかりません (隠しファイルやアクセス不能ファイルを除く)。', cls: 'setting-item-description' });
                 } else {
                     const fileListContainer = entryEl.createDiv({cls: 'whitelist-file-list setting-item-control'});
@@ -1177,7 +1261,7 @@ class LocalServerSettingTab extends PluginSettingTab {
                     fileListContainer.style.marginBottom = '1em';
                     fileListContainer.style.marginLeft = 'var(--size-4-8)';
 
-                    files.forEach((file) => {
+                    cachedFiles.forEach((file) => {
                         const settingItem = createDiv({ cls: 'setting-item' });
                         const infoDiv = createDiv({ cls: 'setting-item-info' });
                         const nameDiv = createDiv({ cls: 'setting-item-name' });
@@ -1254,6 +1338,7 @@ class LocalServerSettingTab extends PluginSettingTab {
         // Use type assertion for onOwnDetach
         (this.containerEl as any).onOwnDetach(() => {
              this.plugin.settingTabFileList.clear();
+             this.plugin.settingTabFileListLoading.clear();
         });
         // *** End Correction ***
 	}
