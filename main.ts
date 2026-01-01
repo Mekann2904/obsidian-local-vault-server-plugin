@@ -2,7 +2,7 @@
 // Role: Obsidian 内でローカルファイル配信サーバーを管理するプラグイン本体
 // Why: Vault 内のファイルを安全に配信し、設定 UI とログ表示を提供するため
 // Related: manifest.json, README.md, styles.css, main.js
-import { App, Plugin, PluginSettingTab, Setting, Modal, Notice, DataAdapter, FileSystemAdapter, TextComponent } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Modal, Notice, DataAdapter, FileSystemAdapter, TextComponent, TFile } from 'obsidian';
 import * as http from 'http';
 import * as https from 'https';
 import * as fs from 'fs';
@@ -1006,6 +1006,62 @@ class LocalServerSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	private getVaultBasePath(): string | null {
+		const adapter = this.app.vault.adapter;
+		if (adapter && typeof (adapter as any).getBasePath === 'function') {
+			try {
+				return fs.realpathSync((adapter as any).getBasePath());
+			} catch {
+				return null;
+			}
+		}
+		return null;
+	}
+
+	private getVaultRelativePath(absolutePath: string): string | null {
+		const basePath = this.getVaultBasePath();
+		if (!basePath) {
+			return null;
+		}
+		try {
+			const realPath = fs.realpathSync(absolutePath);
+			if (!this.plugin.isPathInside(basePath, realPath)) {
+				return null;
+			}
+			const relative = path.relative(basePath, realPath);
+			return relative.split(path.sep).join(path.posix.sep);
+		} catch {
+			return null;
+		}
+	}
+
+	private getResourceUrl(absolutePath: string): string | null {
+		const vaultPath = this.getVaultRelativePath(absolutePath);
+		if (!vaultPath) {
+			return null;
+		}
+		const file = this.app.vault.getAbstractFileByPath(vaultPath);
+		if (file instanceof TFile) {
+			return this.app.vault.getResourcePath(file);
+		}
+		return null;
+	}
+
+	private isPreviewableImage(filePath: string): boolean {
+		const ext = path.extname(filePath).toLowerCase();
+		return [
+			'.png',
+			'.jpg',
+			'.jpeg',
+			'.gif',
+			'.webp',
+			'.avif',
+			'.bmp',
+			'.tif',
+			'.tiff',
+		].includes(ext);
+	}
+
     private async listFilesRecursive(dir: string, baseDir: string): Promise<string[]> {
 		const results: string[] = [];
 		const stack: string[] = [dir];
@@ -1344,6 +1400,28 @@ class LocalServerSettingTab extends PluginSettingTab {
                                     })
                             );
                         fileSetting.settingEl.addClass('whitelist-file-item');
+
+                        const infoEl = fileSetting.settingEl.querySelector('.setting-item-info');
+                        const nameEl = fileSetting.settingEl.querySelector('.setting-item-name');
+                        if (infoEl && nameEl) {
+                            const rowEl = document.createElement('div');
+                            rowEl.className = 'whitelist-file-row';
+                            nameEl.remove();
+                            if (this.isPreviewableImage(file)) {
+                                const imageEl = document.createElement('img');
+                                imageEl.className = 'whitelist-file-preview';
+                                imageEl.loading = 'lazy';
+                                imageEl.alt = file;
+                                const absolutePath = path.join(entryServedPath, file);
+                                const resourceUrl = this.getResourceUrl(absolutePath);
+                                if (resourceUrl) {
+                                    imageEl.src = resourceUrl;
+                                    rowEl.appendChild(imageEl);
+                                }
+                            }
+                            rowEl.appendChild(nameEl);
+                            infoEl.appendChild(rowEl);
+                        }
                     });
                 }
             } else if (entry.enableWhitelist && !entryServedPath) {
