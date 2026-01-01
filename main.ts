@@ -170,6 +170,7 @@ export default class LocalServerPlugin extends Plugin {
 		}
 		// this.runningServers.clear(); // stopAllServers でクリアされる
 		this.settingTabFileList.clear();
+		this.settingTabFileListLoading.clear();
 		this.log('info', 'LocalServerPlugin unloaded.');
 	}
 
@@ -1308,7 +1309,7 @@ class LocalServerSettingTab extends PluginSettingTab {
                 if (cachedFiles.length === 0) {
                     entryEl.createEl('p', { text: '指定されたディレクトリにファイルが見つかりません (隠しファイルやアクセス不能ファイルを除く)。', cls: 'setting-item-description' });
                 } else {
-                    const fileListContainer = entryEl.createDiv({cls: 'whitelist-file-list setting-item-control'});
+                    const fileListContainer = entryEl.createDiv({cls: 'whitelist-file-list'});
                     fileListContainer.style.maxHeight = '40vh';
                     fileListContainer.style.overflowY = 'auto';
                     fileListContainer.style.border = '1px solid var(--background-modifier-border)';
@@ -1317,15 +1318,8 @@ class LocalServerSettingTab extends PluginSettingTab {
                     fileListContainer.style.marginLeft = 'var(--size-4-8)';
 
                     cachedFiles.forEach((file) => {
-                        const settingItem = createDiv({ cls: 'setting-item' });
-                        const infoDiv = createDiv({ cls: 'setting-item-info' });
-                        const nameDiv = createDiv({ cls: 'setting-item-name' });
-                        nameDiv.textContent = file;
-                        infoDiv.appendChild(nameDiv);
-                        settingItem.appendChild(infoDiv);
-
-                        const controlDiv = createDiv({ cls: 'setting-item-control' });
-                        new Setting(controlDiv)
+                        const fileSetting = new Setting(fileListContainer)
+                            .setName(file)
                             .addToggle(toggle =>
                                 toggle
                                     .setValue(entry.whitelistFiles.includes(file))
@@ -1349,8 +1343,7 @@ class LocalServerSettingTab extends PluginSettingTab {
                                         }
                                     })
                             );
-                         settingItem.appendChild(controlDiv);
-                         fileListContainer.appendChild(settingItem);
+                        fileSetting.settingEl.addClass('whitelist-file-item');
                     });
                 }
             } else if (entry.enableWhitelist && !entryServedPath) {
@@ -1389,12 +1382,6 @@ class LocalServerSettingTab extends PluginSettingTab {
                  .replace(/'/g, "&#39;");
          }
 
-        // *** Error 13 Correction ***
-        // Use type assertion for onOwnDetach
-        (this.containerEl as any).onOwnDetach(() => {
-             this.plugin.settingTabFileList.clear();
-             this.plugin.settingTabFileListLoading.clear();
-        });
-        // *** End Correction ***
+		// 設定タブの破棄フックは環境差が大きいので、ここでは登録しない
 	}
 }

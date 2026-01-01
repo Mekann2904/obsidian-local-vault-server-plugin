@@ -1,8 +1,27 @@
-/*
+/* Path: styles.css */
+/* Role: プラグイン設定画面の表示を整えるためのスタイル定義 */
+/* Why: ホワイトリスト一覧の見た目を読みやすく揃えるため */
+/* Related: main.ts, manifest.json, README.md */
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.whitelist-file-list {
+	background: var(--background-secondary);
+	border-radius: var(--radius-m);
+}
 
-If your plugin does not need CSS, delete this file.
+.whitelist-file-list .setting-item {
+	padding: 6px 8px;
+	margin: 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
 
-*/
+.whitelist-file-list .setting-item:last-child {
+	border-bottom: none;
+}
+
+.whitelist-file-list .setting-item-name {
+	word-break: break-all;
+}
+
+.whitelist-file-list .setting-item-control {
+	margin-left: 12px;
+}
