@@ -390,6 +390,43 @@ export default class LocalServerPlugin extends Plugin {
 		return !relative.startsWith('..') && !path.isAbsolute(relative);
 	}
 
+	// Vault の実パスを取得する
+	private getVaultBasePath(): string | null {
+		const adapter = this.app.vault.adapter;
+		if (adapter && typeof (adapter as any).getBasePath === 'function') {
+			try {
+				return fs.realpathSync((adapter as any).getBasePath());
+			} catch {
+				return null;
+			}
+		}
+		return null;
+	}
+
+	// 絶対パスを Vault 相対パスへ変換する
+	private getVaultRelativePath(basePath: string, absolutePath: string): string | null {
+		try {
+			const realPath = fs.realpathSync(absolutePath);
+			if (!this.isPathInside(basePath, realPath)) {
+				return null;
+			}
+			const relative = path.relative(basePath, realPath);
+			return relative.split(path.sep).join(path.posix.sep);
+		} catch {
+			return null;
+		}
+	}
+
+	// Obsidian の Vault に存在するファイルかを確認する
+	private isVaultFile(basePath: string, absolutePath: string): boolean {
+		const vaultPath = this.getVaultRelativePath(basePath, absolutePath);
+		if (!vaultPath) {
+			return false;
+		}
+		const file = this.app.vault.getAbstractFileByPath(vaultPath);
+		return file instanceof TFile;
+	}
+
 	resolveServedPath(entry: ServerEntrySettings): string | null {
         if (!entry.serveDir) {
             return null;
@@ -703,6 +740,10 @@ export default class LocalServerPlugin extends Plugin {
                 this.log('error', `Internal error: servedRealPath is null for running server entry "${entry.name}".`, entry.name, req.method, req.url);
                 return;
             }
+			const vaultBasePath = this.getVaultBasePath();
+			const enforceVaultFiles = Boolean(
+				vaultBasePath && this.isPathInside(vaultBasePath, servedRealPath)
+			);
 
             const safePathname = path.posix.normalize('/' + pathname).replace(/^(\.\.[\/\\])+/, '');
             const cleanPathname = safePathname.replace(/\0/g, '');
@@ -774,6 +815,11 @@ export default class LocalServerPlugin extends Plugin {
                         }
                         this.serveDirectoryListing(res, resolvedPath, cleanPathname, entry.name, startTime, entry.enableWhitelist, entry.whitelistFiles, servedRealPath, req.method, req.url);
 					} else if (stats.isFile()) {
+						if (enforceVaultFiles && vaultBasePath && !this.isVaultFile(vaultBasePath, resolvedPath)) {
+							statusCode = 404;
+							this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url, cleanPathname);
+							return;
+						}
 						this.serveFile(res, resolvedPath, stats, entry.name, startTime, req.method, req.url);
 					} else {
 						statusCode = 403;
@@ -817,6 +863,10 @@ export default class LocalServerPlugin extends Plugin {
 			this.sendResponse(res, 404, 'Not Found', startTime, entry.name, method, url, relativePath);
 			return;
 		}
+		const vaultBasePath = this.getVaultBasePath();
+		const enforceVaultFiles = Boolean(
+			vaultBasePath && this.isPathInside(vaultBasePath, servedRealPath)
+		);
 
 		const whitelistSet = entry.enableWhitelist
 			? this.normalizeWhitelist(entry.whitelistFiles)
@@ -854,7 +904,9 @@ export default class LocalServerPlugin extends Plugin {
 			servedRealPath,
 			extensions,
 			recursive,
-			whitelistSet
+			whitelistSet,
+			vaultBasePath,
+			enforceVaultFiles
 		);
 
 		if (itemsResult.errorMessage) {
@@ -944,7 +996,9 @@ export default class LocalServerPlugin extends Plugin {
 		servedRealPath: string,
 		extensions: Set<string>,
 		recursive: boolean,
-		whitelistSet: Set<string> | null
+		whitelistSet: Set<string> | null,
+		vaultBasePath: string | null,
+		enforceVaultFiles: boolean
 	): Promise<{ items: IndexItem[]; etag: string; errorMessage: string }> {
 		const items: IndexItem[] = [];
 		const hash = crypto.createHash('sha1');
@@ -990,6 +1044,9 @@ export default class LocalServerPlugin extends Plugin {
 				const relativeOs = path.relative(servedRealPath, fullPath);
 				const relativePath = relativeOs.split(path.sep).join(path.posix.sep);
 				if (whitelistSet && !whitelistSet.has(relativePath)) {
+					continue;
+				}
+				if (enforceVaultFiles && vaultBasePath && !this.isVaultFile(vaultBasePath, fullPath)) {
 					continue;
 				}
 
