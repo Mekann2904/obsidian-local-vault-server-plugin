@@ -138,6 +138,8 @@ export default class LocalServerPlugin extends Plugin {
 	private settingsListeners: Set<(settings: LocalServerPluginSettings) => void> = new Set();
 	/** インデックスの短期キャッシュ */
 	private indexCache: Map<string, IndexCacheEntry> = new Map();
+	/** Vault の実パスをキャッシュして同期 I/O を減らす */
+	private vaultBasePathCache: string | null = null;
 
 	// *** Error 2 & 5: Property 'statusBarItemEl' / 'logMessages' does not exist on type 'LocalServerPlugin'. ***
     // These properties ARE defined below. If the error persists, it's likely an environment issue.
@@ -392,10 +394,15 @@ export default class LocalServerPlugin extends Plugin {
 
 	// Vault の実パスを取得する
 	private getVaultBasePath(): string | null {
+		if (this.vaultBasePathCache) {
+			return this.vaultBasePathCache;
+		}
 		const adapter = this.app.vault.adapter;
 		if (adapter && typeof (adapter as any).getBasePath === 'function') {
 			try {
-				return fs.realpathSync((adapter as any).getBasePath());
+				const resolved = fs.realpathSync((adapter as any).getBasePath());
+				this.vaultBasePathCache = resolved;
+				return resolved;
 			} catch {
 				return null;
 			}
@@ -423,6 +430,17 @@ export default class LocalServerPlugin extends Plugin {
 		if (!vaultPath) {
 			return false;
 		}
+		const file = this.app.vault.getAbstractFileByPath(vaultPath);
+		return file instanceof TFile;
+	}
+
+	// realpath 済みのパスから Vault ファイルかを確認する
+	private isVaultFileResolvedPath(basePath: string, resolvedPath: string): boolean {
+		const relative = path.relative(basePath, resolvedPath);
+		if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+			return false;
+		}
+		const vaultPath = relative.split(path.sep).join(path.posix.sep);
 		const file = this.app.vault.getAbstractFileByPath(vaultPath);
 		return file instanceof TFile;
 	}
@@ -815,7 +833,7 @@ export default class LocalServerPlugin extends Plugin {
                         }
                         this.serveDirectoryListing(res, resolvedPath, cleanPathname, entry.name, startTime, entry.enableWhitelist, entry.whitelistFiles, servedRealPath, req.method, req.url);
 					} else if (stats.isFile()) {
-						if (enforceVaultFiles && vaultBasePath && !this.isVaultFile(vaultBasePath, resolvedPath)) {
+						if (enforceVaultFiles && vaultBasePath && !this.isVaultFileResolvedPath(vaultBasePath, resolvedPath)) {
 							statusCode = 404;
 							this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url, cleanPathname);
 							return;
