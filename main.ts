@@ -1950,7 +1950,67 @@ export default class LocalServerPlugin extends Plugin {
 		.header { margin-bottom: 20px; }
 		.header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 		.header-title { min-width: 0; }
-		.header-actions { display: flex; align-items: center; gap: 8px; }
+		.header-actions {
+			position: fixed;
+			top: 20px;
+			right: 20px;
+			z-index: 20;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+		}
+		.menu-toggle {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 10px;
+			border-radius: 999px;
+			border: 1px solid #e1e1dc;
+			background: #fff;
+			color: #2b2b2b;
+			font-family: var(--font-sans);
+			font-size: 12px;
+			cursor: pointer;
+			transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+		}
+		.menu-toggle:hover { border-color: #cfcfc9; background: #f7f7f3; }
+		.menu-toggle:focus { outline: none; border-color: #bfc7f1; box-shadow: 0 0 0 2px rgba(191, 199, 241, 0.35); }
+		.menu-icon { display: inline-grid; gap: 3px; }
+		.menu-icon span { display: block; width: 14px; height: 2px; background: currentColor; border-radius: 999px; }
+		.menu-label { font-size: 11px; letter-spacing: 0.02em; text-transform: uppercase; color: #6b6b6b; }
+		.menu-panel {
+			position: absolute;
+			top: calc(100% + 8px);
+			right: 0;
+			min-width: 280px;
+			padding: 12px;
+			border-radius: 14px;
+			border: 1px solid #e3e3df;
+			background: #ffffff;
+			box-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
+			opacity: 0;
+			transform: translateY(-6px);
+			pointer-events: none;
+			transition: opacity 0.15s ease, transform 0.15s ease;
+			z-index: 10;
+		}
+		.menu-panel.is-open {
+			opacity: 1;
+			transform: translateY(0);
+			pointer-events: auto;
+		}
+		.menu-title {
+			font-family: var(--font-sans);
+			font-size: 11px;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+			color: #8a8a83;
+			margin-bottom: 10px;
+		}
+		.menu-controls {
+			display: grid;
+			gap: 10px;
+		}
 		.title { font-size: 18px; font-weight: 600; margin: 0 0 4px; font-family: var(--font-sans); }
 		.path { font-size: 12px; color: #6b6b6b; word-break: break-all; font-family: var(--font-sans); }
 		.width-control {
@@ -2004,7 +2064,7 @@ export default class LocalServerPlugin extends Plugin {
 			color: #5b5b5b;
 			font-family: var(--font-sans);
 			font-size: 12px;
-			cursor: pointer;
+			cursor: default;
 			transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 		}
 		.width-toggle:hover { border-color: #cfcfc9; color: #2b2b2b; background: #f7f7f3; }
@@ -2076,6 +2136,8 @@ export default class LocalServerPlugin extends Plugin {
 		@media (max-width: 720px) {
 			.page { padding: 28px 16px 48px; }
 			.header-row { align-items: flex-start; }
+			.header-actions { top: 16px; right: 16px; }
+			.menu-panel { right: 0; left: auto; min-width: 240px; }
 		}
 	</style>
 	<script>
@@ -2101,20 +2163,33 @@ export default class LocalServerPlugin extends Plugin {
 					<p class="path">${escapeHtml(sourcePath)}</p>
 				</div>
 				<div class="header-actions">
-					<label class="width-control" data-action="width-size" title="横幅(px)">
-						<span class="label">WIDTH</span>
-						<input class="width-input" type="number" min="480" max="2000" step="10" value="900" aria-label="横幅(px)">
-						<span class="unit">px</span>
-					</label>
-					<button class="width-toggle" type="button" data-action="toggle-width" aria-pressed="false" title="フル幅に切り替え">
-						<span class="label">FULL</span>
-						<span class="value" data-width-value>OFF</span>
+					<button class="menu-toggle" type="button" data-action="toggle-menu" aria-expanded="false" aria-controls="view-options" title="表示設定">
+						<span class="menu-icon" aria-hidden="true">
+							<span></span>
+							<span></span>
+							<span></span>
+						</span>
+						<span class="menu-label">Menu</span>
 					</button>
-					<label class="font-control" data-action="font-size" title="文字サイズ(px)">
-						<span class="label">TEXT</span>
-						<input class="font-input" type="number" min="10" max="30" step="1" value="16" aria-label="文字サイズ(px)">
-						<span class="unit">px</span>
-					</label>
+					<div class="menu-panel" id="view-options">
+						<div class="menu-title">表示設定</div>
+						<div class="menu-controls">
+							<label class="width-control" data-action="width-size" title="横幅(px)">
+								<span class="label">WIDTH</span>
+								<input class="width-input" type="number" min="480" max="2000" step="10" value="900" aria-label="横幅(px)">
+								<span class="unit">px</span>
+							</label>
+							<button class="width-toggle" type="button" data-action="toggle-width" aria-pressed="false" title="フル幅に切り替え">
+								<span class="label">FULL</span>
+								<span class="value" data-width-value>OFF</span>
+							</button>
+							<label class="font-control" data-action="font-size" title="文字サイズ(px)">
+								<span class="label">TEXT</span>
+								<input class="font-input" type="number" min="10" max="30" step="1" value="16" aria-label="文字サイズ(px)">
+								<span class="unit">px</span>
+							</label>
+						</div>
+					</div>
 				</div>
 			</div>
 		</header>
@@ -2132,6 +2207,8 @@ export default class LocalServerPlugin extends Plugin {
 			const widthInput = document.querySelector('.width-input');
 			const fontStorageKey = 'local-vault-preview-font-size';
 			const fontInput = document.querySelector('.font-input');
+			const menuToggle = document.querySelector('[data-action="toggle-menu"]');
+			const menuPanel = document.querySelector('.menu-panel');
 
 			const applyWidthMode = (mode) => {
 				if (!pageEl || !widthToggle || !widthValue) {
@@ -2177,6 +2254,40 @@ export default class LocalServerPlugin extends Plugin {
 							: 900;
 						const safeWidth = Number.isFinite(rawWidth) ? rawWidth : 900;
 						applyWidthSize(safeWidth);
+					}
+				});
+			}
+
+			if (menuToggle instanceof HTMLButtonElement && menuPanel instanceof HTMLElement) {
+				const openMenu = () => {
+					menuPanel.classList.add('is-open');
+					menuToggle.setAttribute('aria-expanded', 'true');
+				};
+				const closeMenu = () => {
+					menuPanel.classList.remove('is-open');
+					menuToggle.setAttribute('aria-expanded', 'false');
+				};
+
+				menuToggle.addEventListener('click', (event) => {
+					event.stopPropagation();
+					if (menuPanel.classList.contains('is-open')) {
+						closeMenu();
+					} else {
+						openMenu();
+					}
+				});
+
+				menuPanel.addEventListener('click', (event) => {
+					event.stopPropagation();
+				});
+
+				document.addEventListener('click', () => {
+					closeMenu();
+				});
+
+				document.addEventListener('keydown', (event) => {
+					if (event.key === 'Escape') {
+						closeMenu();
 					}
 				});
 			}
