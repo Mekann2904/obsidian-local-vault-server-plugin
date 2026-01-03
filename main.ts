@@ -1941,6 +1941,7 @@ export default class LocalServerPlugin extends Plugin {
 			--font-mono: "Ricty Diminished", "Ricty", "Menlo", "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
 			--font-math: "XITS Math", "STIX Two Math", "Cambria Math", "Latin Modern Math", serif;
 			--page-max-width: 900px;
+			--page-single-width: 900px;
 			--page-padding-x: 20px;
 			--content-font-size: 16px;
 			--page-bg: #fbfbf9;
@@ -1968,6 +1969,10 @@ export default class LocalServerPlugin extends Plugin {
 			--success-border: #9ad1b3;
 			--success-text: #1f7a4f;
 			--success-bg: #f0faf4;
+			--pagebook-gap: 0px;
+			--pagebook-page-height: 60vh;
+			--pagebook-page-width: 100%;
+			--pagebook-columns: 1;
 		}
 		:root[data-theme="dark"] {
 			--page-bg: #0f1112;
@@ -1997,9 +2002,12 @@ export default class LocalServerPlugin extends Plugin {
 			--success-bg: #123025;
 		}
 		body { margin: 0; font-family: var(--font-serif); background: var(--page-bg); color: var(--page-text); }
+		body.is-paged { overflow: hidden; }
 		.page { max-width: var(--page-max-width); margin: 0 auto; padding: 36px var(--page-padding-x) 64px; transition: max-width 0.2s ease; }
+		.page.is-paged { padding-top: 20px; padding-bottom: 28px; }
 		.page.is-full { max-width: 100%; }
 		.header { margin-bottom: 20px; }
+		.header.is-paged { margin-bottom: 12px; }
 		.header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 		.header-title { min-width: 0; }
 		.header-actions {
@@ -2152,6 +2160,68 @@ export default class LocalServerPlugin extends Plugin {
 			font-size: var(--content-font-size);
 			line-height: 1.75;
 		}
+		.content.is-paged {
+			background: transparent;
+			border: none;
+			box-shadow: none;
+			padding: 0;
+		}
+		.pagebook {
+			display: grid;
+			gap: 12px;
+		}
+		.pagebook-viewport {
+			width: min(100%, calc((var(--pagebook-page-width) * var(--pagebook-columns)) + (var(--pagebook-gap) * (var(--pagebook-columns) - 1))));
+			margin: 0 auto;
+			overflow: hidden;
+		}
+		.pagebook-track {
+			display: flex;
+			gap: var(--pagebook-gap);
+			transition: transform 0.25s ease;
+			will-change: transform;
+		}
+		.pagebook-page {
+			flex: 0 0 var(--pagebook-page-width);
+			height: var(--pagebook-page-height);
+			padding: 18px 20px;
+			box-sizing: border-box;
+			background: var(--surface);
+			border: 1px solid var(--border-strong);
+			border-radius: 12px;
+			box-shadow: var(--shadow);
+			overflow: hidden;
+		}
+		.pagebook-page.is-overflow { overflow: auto; }
+		.pagebook-controls {
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			gap: 10px;
+		}
+		.pagebook-button {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			min-width: 34px;
+			height: 30px;
+			padding: 0 10px;
+			border-radius: 999px;
+			border: 1px solid var(--border);
+			background: var(--surface);
+			color: var(--page-text);
+			font-family: var(--font-sans);
+			font-size: 12px;
+			cursor: pointer;
+			transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+		}
+		.pagebook-button:hover { border-color: var(--border-strong); background: var(--surface-muted); }
+		.pagebook-button:disabled { opacity: 0.5; cursor: default; }
+		.pagebook-indicator {
+			font-family: var(--font-sans);
+			font-size: 12px;
+			color: var(--text-muted);
+		}
 		.content h1, .content h2, .content h3 { margin-top: 1.6em; }
 		.content pre { background: var(--code-bg); color: var(--page-text); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--code-border); overflow-x: auto; position: relative; }
 		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: var(--font-mono); }
@@ -2243,6 +2313,10 @@ export default class LocalServerPlugin extends Plugin {
 								<span class="label">FULL</span>
 								<span class="value" data-width-value>OFF</span>
 							</button>
+							<button class="width-toggle" type="button" data-action="toggle-spread" aria-pressed="false" title="見開きモード">
+								<span class="label">SPREAD</span>
+								<span class="value" data-spread-value>OFF</span>
+							</button>
 							<button class="width-toggle" type="button" data-action="toggle-theme" aria-pressed="false" title="テーマを切り替え">
 								<span class="label">THEME</span>
 								<span class="value" data-theme-value>LIGHT</span>
@@ -2274,8 +2348,21 @@ export default class LocalServerPlugin extends Plugin {
 			const themeStorageKey = 'local-vault-preview-theme';
 			const themeToggle = document.querySelector('[data-action="toggle-theme"]');
 			const themeValue = themeToggle ? themeToggle.querySelector('[data-theme-value]') : null;
+			const spreadStorageKey = 'local-vault-preview-spread';
+			const spreadToggle = document.querySelector('[data-action="toggle-spread"]');
+			const spreadValue = spreadToggle ? spreadToggle.querySelector('[data-spread-value]') : null;
 			const menuToggle = document.querySelector('[data-action="toggle-menu"]');
 			const menuPanel = document.querySelector('.menu-panel');
+			const contentEl = document.querySelector('.content');
+			const headerEl = document.querySelector('.header');
+			let baseContentHtml = contentEl ? contentEl.innerHTML : '';
+			const pagebookState = {
+				enabled: false,
+				spread: false,
+				currentIndex: 0,
+				pageCount: 0,
+				setPage: null,
+			};
 
 			const applyWidthMode = (mode) => {
 				if (!pageEl || !widthToggle || !widthValue) {
@@ -2285,6 +2372,36 @@ export default class LocalServerPlugin extends Plugin {
 				pageEl.classList.toggle('is-full', isFull);
 				widthToggle.setAttribute('aria-pressed', isFull ? 'true' : 'false');
 				widthValue.textContent = isFull ? 'ON' : 'OFF';
+				refreshPagebook();
+			};
+
+			const readPxVar = (name, fallback) => {
+				const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+				const parsed = Number.parseFloat(raw);
+				return Number.isFinite(parsed) ? parsed : fallback;
+			};
+
+			const computeLayout = (desiredSingleWidth, spreadEnabled) => {
+				const columns = spreadEnabled ? 2 : 1;
+				const gap = spreadEnabled ? 16 : 0;
+				const paddingX = readPxVar('--page-padding-x', 20);
+				const maxTotal = Math.max(320, window.innerWidth - (paddingX * 2));
+
+				if (columns === 1) {
+					const singleWidth = Math.min(desiredSingleWidth, maxTotal);
+					return { columns, gap, singleWidth, totalWidth: singleWidth };
+				}
+
+				const maxSingle = Math.max(240, Math.floor((maxTotal - gap) / 2));
+				const singleWidth = Math.min(desiredSingleWidth, maxSingle);
+				const totalWidth = (singleWidth * 2) + gap;
+				return { columns, gap, singleWidth, totalWidth };
+			};
+
+			const updatePageMaxWidth = (singleWidth, spreadEnabled) => {
+				const layout = computeLayout(singleWidth, spreadEnabled);
+				document.documentElement.style.setProperty('--page-single-width', layout.singleWidth + 'px');
+				document.documentElement.style.setProperty('--page-max-width', layout.totalWidth + 'px');
 			};
 
 			const applyWidthSize = (size) => {
@@ -2292,8 +2409,9 @@ export default class LocalServerPlugin extends Plugin {
 					return;
 				}
 				const safeSize = Math.min(2000, Math.max(480, size));
-				document.documentElement.style.setProperty('--page-max-width', safeSize + 'px');
+				updatePageMaxWidth(safeSize, pagebookState.spread);
 				widthInput.value = String(safeSize);
+				refreshPagebook();
 			};
 
 			const applyFontSize = (size) => {
@@ -2304,6 +2422,7 @@ export default class LocalServerPlugin extends Plugin {
 				const safeSize = Math.min(30, Math.max(10, size));
 				document.documentElement.style.setProperty('--content-font-size', safeSize + 'px');
 				fontInput.value = String(safeSize);
+				refreshPagebook();
 			};
 
 			const getPreferredTheme = () => {
@@ -2320,6 +2439,247 @@ export default class LocalServerPlugin extends Plugin {
 					themeToggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
 					themeValue.textContent = theme === 'dark' ? 'DARK' : 'LIGHT';
 				}
+			};
+
+			const requestMathTypeset = () => {
+				const waitForMathJax = () => {
+					if (!window.MathJax || !window.MathJax.typesetPromise) {
+						setTimeout(waitForMathJax, 50);
+						return;
+					}
+					window.MathJax.typesetPromise();
+				};
+				waitForMathJax();
+			};
+
+			const enhanceContent = () => {
+				if (!contentEl) {
+					return;
+				}
+				const removeSelectors = ['.copy-code-button', '.code-block-flair', '.codeblock-copy', '.code-block-flair'];
+				removeSelectors.forEach((selector) => {
+					contentEl.querySelectorAll(selector).forEach((el) => el.remove());
+				});
+
+				contentEl.querySelectorAll('pre').forEach((pre) => {
+					pre.classList.add('code-block');
+
+					pre.querySelectorAll('button').forEach((button) => {
+						button.remove();
+					});
+
+					const code = pre.querySelector('code');
+					if (!code) {
+						return;
+					}
+
+					const copyButton = document.createElement('button');
+					copyButton.type = 'button';
+					copyButton.className = 'code-copy-button';
+					copyButton.setAttribute('aria-label', 'Copy code');
+					copyButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 7a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V7zm-3 3a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-1h-2v1H5v-7h1V10H5z"/></svg>';
+
+					copyButton.addEventListener('click', async () => {
+						const text = code.innerText;
+						try {
+							await navigator.clipboard.writeText(text);
+						} catch (error) {
+							const temp = document.createElement('textarea');
+							temp.value = text;
+							temp.style.position = 'fixed';
+							temp.style.opacity = '0';
+							document.body.appendChild(temp);
+							temp.select();
+							document.execCommand('copy');
+							temp.remove();
+						}
+						copyButton.classList.add('is-copied');
+						setTimeout(() => copyButton.classList.remove('is-copied'), 1200);
+					});
+
+					pre.appendChild(copyButton);
+				});
+
+				contentEl.querySelectorAll('table').forEach((table) => {
+					const parent = table.parentElement;
+					if (parent && parent.classList.contains('table-wrap')) {
+						return;
+					}
+					const wrapper = document.createElement('div');
+					wrapper.className = 'table-wrap';
+					table.parentNode?.insertBefore(wrapper, table);
+					wrapper.appendChild(table);
+				});
+
+				requestMathTypeset();
+			};
+
+			const buildPagebook = (preserveIndex) => {
+				// ページ送り表示のため、現在の内容を高さベースで分割する。
+				if (!contentEl) {
+					return;
+				}
+				const savedIndex = preserveIndex ? pagebookState.currentIndex : 0;
+				contentEl.classList.add('is-paged');
+				contentEl.innerHTML = baseContentHtml;
+				enhanceContent();
+
+				const nodes = Array.from(contentEl.childNodes);
+				const pagebook = document.createElement('div');
+				pagebook.className = 'pagebook';
+
+				const viewport = document.createElement('div');
+				viewport.className = 'pagebook-viewport';
+
+				const track = document.createElement('div');
+				track.className = 'pagebook-track';
+				viewport.appendChild(track);
+
+				const controls = document.createElement('div');
+				controls.className = 'pagebook-controls';
+
+				const prevButton = document.createElement('button');
+				prevButton.type = 'button';
+				prevButton.className = 'pagebook-button';
+				prevButton.textContent = 'Prev';
+
+				const indicator = document.createElement('span');
+				indicator.className = 'pagebook-indicator';
+
+				const nextButton = document.createElement('button');
+				nextButton.type = 'button';
+				nextButton.className = 'pagebook-button';
+				nextButton.textContent = 'Next';
+
+				controls.appendChild(prevButton);
+				controls.appendChild(indicator);
+				controls.appendChild(nextButton);
+
+				pagebook.appendChild(viewport);
+				pagebook.appendChild(controls);
+
+				contentEl.innerHTML = '';
+				contentEl.appendChild(pagebook);
+
+				const headerRect = headerEl ? headerEl.getBoundingClientRect() : null;
+				const topOffset = headerRect ? headerRect.bottom : 0;
+				const availableHeight = Math.max(360, window.innerHeight - topOffset - 16);
+				const desiredSingleWidth = widthInput instanceof HTMLInputElement
+					? Math.min(2000, Math.max(480, Number.parseInt(widthInput.value || '', 10) || 900))
+					: 900;
+				const layout = computeLayout(desiredSingleWidth, pagebookState.spread);
+
+				contentEl.style.setProperty('--pagebook-gap', layout.gap + 'px');
+				contentEl.style.setProperty('--pagebook-columns', String(layout.columns));
+				contentEl.style.setProperty('--pagebook-page-width', layout.singleWidth + 'px');
+				contentEl.style.setProperty('--pagebook-page-height', availableHeight + 'px');
+
+				updatePageMaxWidth(desiredSingleWidth, pagebookState.spread);
+				const columns = layout.columns;
+				const gap = layout.gap;
+				const pageWidth = layout.singleWidth;
+
+				const createPage = () => {
+					const page = document.createElement('section');
+					page.className = 'pagebook-page';
+					page.style.height = availableHeight + 'px';
+					return page;
+				};
+
+				let currentPage = createPage();
+				track.appendChild(currentPage);
+
+				nodes.forEach((node) => {
+					if (node.nodeType === Node.TEXT_NODE && !(node.textContent || '').trim()) {
+						return;
+					}
+					currentPage.appendChild(node);
+					if (currentPage.scrollHeight > availableHeight) {
+						currentPage.removeChild(node);
+						// 単体で収まりきらない要素はそのページでスクロールを許可する。
+						if (currentPage.childNodes.length === 0) {
+							currentPage.appendChild(node);
+							currentPage.classList.add('is-overflow');
+						} else {
+							currentPage = createPage();
+							track.appendChild(currentPage);
+							currentPage.appendChild(node);
+							if (currentPage.scrollHeight > availableHeight) {
+								currentPage.classList.add('is-overflow');
+							}
+						}
+					}
+				});
+
+				pagebookState.pageCount = track.children.length;
+
+				const setPage = (index) => {
+					const maxIndex = Math.max(0, pagebookState.pageCount - columns);
+					const clamped = Math.min(Math.max(0, index), maxIndex);
+					pagebookState.currentIndex = clamped;
+					const step = pageWidth + gap;
+					const offset = -clamped * step;
+					track.style.transform = 'translateX(' + offset + 'px)';
+					const start = clamped + 1;
+					const end = Math.min(clamped + columns, pagebookState.pageCount);
+					indicator.textContent = start === end
+						? String(start) + ' / ' + String(pagebookState.pageCount)
+						: String(start) + '-' + String(end) + ' / ' + String(pagebookState.pageCount);
+					prevButton.disabled = clamped <= 0;
+					nextButton.disabled = clamped >= maxIndex;
+				};
+
+				pagebookState.setPage = setPage;
+				prevButton.addEventListener('click', () => setPage(pagebookState.currentIndex - columns));
+				nextButton.addEventListener('click', () => setPage(pagebookState.currentIndex + columns));
+
+				setPage(savedIndex);
+			};
+
+			const disablePagebook = () => {
+				pagebookState.enabled = false;
+				pagebookState.spread = false;
+				pagebookState.setPage = null;
+				document.body.classList.remove('is-paged');
+				if (pageEl) {
+					pageEl.classList.remove('is-paged');
+				}
+				if (headerEl) {
+					headerEl.classList.remove('is-paged');
+				}
+				if (!contentEl) {
+					return;
+				}
+				contentEl.classList.remove('is-paged');
+				contentEl.innerHTML = baseContentHtml;
+				enhanceContent();
+			};
+
+			const enablePagebook = (spreadMode) => {
+				pagebookState.enabled = true;
+				pagebookState.spread = spreadMode;
+				document.body.classList.add('is-paged');
+				if (pageEl) {
+					pageEl.classList.add('is-paged');
+				}
+				if (headerEl) {
+					headerEl.classList.add('is-paged');
+				}
+				buildPagebook(false);
+			};
+
+			let refreshPending = 0;
+			const refreshPagebook = () => {
+				if (!pagebookState.enabled) {
+					return;
+				}
+				if (refreshPending) {
+					cancelAnimationFrame(refreshPending);
+				}
+				refreshPending = requestAnimationFrame(() => {
+					buildPagebook(true);
+					refreshPending = 0;
+				});
 			};
 
 			if (pageEl && widthToggle && widthValue) {
@@ -2467,69 +2827,59 @@ export default class LocalServerPlugin extends Plugin {
 				});
 			}
 
-			const removeSelectors = ['.copy-code-button', '.code-block-flair', '.codeblock-copy', '.code-block-flair'];
-			removeSelectors.forEach((selector) => {
-				document.querySelectorAll(selector).forEach((el) => el.remove());
-			});
-
-			document.querySelectorAll('pre').forEach((pre) => {
-				pre.classList.add('code-block');
-
-				pre.querySelectorAll('button').forEach((button) => {
-					button.remove();
-				});
-
-				const code = pre.querySelector('code');
-				if (!code) {
-					return;
-				}
-
-				const copyButton = document.createElement('button');
-				copyButton.type = 'button';
-				copyButton.className = 'code-copy-button';
-				copyButton.setAttribute('aria-label', 'Copy code');
-				copyButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 7a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V7zm-3 3a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-1h-2v1H5v-7h1V10H5z"/></svg>';
-
-				copyButton.addEventListener('click', async () => {
-					const text = code.innerText;
-					try {
-						await navigator.clipboard.writeText(text);
-					} catch (error) {
-						const temp = document.createElement('textarea');
-						temp.value = text;
-						temp.style.position = 'fixed';
-						temp.style.opacity = '0';
-						document.body.appendChild(temp);
-						temp.select();
-						document.execCommand('copy');
-						temp.remove();
-					}
-					copyButton.classList.add('is-copied');
-					setTimeout(() => copyButton.classList.remove('is-copied'), 1200);
-				});
-
-				pre.appendChild(copyButton);
-			});
-
-			document.querySelectorAll('.content table').forEach((table) => {
-				const parent = table.parentElement;
-				if (parent && parent.classList.contains('table-wrap')) {
-					return;
-				}
-				const wrapper = document.createElement('div');
-				wrapper.className = 'table-wrap';
-				table.parentNode?.insertBefore(wrapper, table);
-				wrapper.appendChild(table);
-			});
-
-			function waitForMathJax() {
-				if (!window.MathJax || !window.MathJax.typesetPromise) {
-					setTimeout(waitForMathJax, 50);
-					return;
-				}
-				window.MathJax.typesetPromise();
+			enhanceContent();
+			if (contentEl) {
+				baseContentHtml = contentEl.innerHTML;
 			}
-			waitForMathJax();
+
+			const applySpreadState = (enabled) => {
+				if (spreadToggle && spreadValue) {
+					spreadToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+					spreadValue.textContent = enabled ? 'ON' : 'OFF';
+				}
+				if (widthInput instanceof HTMLInputElement) {
+					const rawWidth = Number.parseInt(widthInput.value || '', 10);
+					const safeWidth = Number.isFinite(rawWidth) ? rawWidth : 900;
+					updatePageMaxWidth(safeWidth, enabled);
+				}
+				if (enabled) {
+					enablePagebook(true);
+				} else {
+					disablePagebook();
+				}
+			};
+
+			if (spreadToggle) {
+				const savedSpread = localStorage.getItem(spreadStorageKey) === 'on';
+				applySpreadState(savedSpread);
+				spreadToggle.addEventListener('click', () => {
+					const nextState = !pagebookState.enabled;
+					localStorage.setItem(spreadStorageKey, nextState ? 'on' : 'off');
+					applySpreadState(nextState);
+				});
+			}
+
+			document.addEventListener('keydown', (event) => {
+				if (!pagebookState.enabled || !pagebookState.setPage) {
+					return;
+				}
+				const target = event.target;
+				if (target instanceof HTMLElement && target.closest('input, textarea, [contenteditable="true"]')) {
+					return;
+				}
+				if (event.key === 'ArrowRight' || event.key === 'PageDown') {
+					event.preventDefault();
+					pagebookState.setPage(pagebookState.currentIndex + (pagebookState.spread ? 2 : 1));
+				}
+				if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+					event.preventDefault();
+					pagebookState.setPage(pagebookState.currentIndex - (pagebookState.spread ? 2 : 1));
+				}
+			});
+
+			window.addEventListener('resize', () => {
+				refreshPagebook();
+			});
 		})();
 	</script>
 </body>
