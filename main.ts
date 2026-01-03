@@ -2419,6 +2419,8 @@ export default class LocalServerPlugin extends Plugin {
 				pageCount: 0,
 				setPage: null,
 			};
+			// 非同期レイアウト待ちの競合を避けるためのトークン
+			let pagebookBuildToken = 0;
 
 			const applyWidthMode = (mode) => {
 				if (!pageEl || !widthToggle || !widthValue) {
@@ -2452,6 +2454,11 @@ export default class LocalServerPlugin extends Plugin {
 				const singleWidth = Math.min(desiredSingleWidth, maxSingle);
 				const totalWidth = (singleWidth * 2) + gap;
 				return { columns, gap, singleWidth, totalWidth };
+			};
+
+			// 見出しかどうかを判定する（H1〜H6）
+			const isHeadingElement = (node) => {
+				return !!(node && node.nodeType === Node.ELEMENT_NODE && /^H[1-6]$/i.test(node.tagName));
 			};
 
 			const updatePageMaxWidth = (singleWidth, spreadEnabled) => {
@@ -2497,15 +2504,64 @@ export default class LocalServerPlugin extends Plugin {
 				}
 			};
 
-			const requestMathTypeset = () => {
-				const waitForMathJax = () => {
-					if (!window.MathJax || !window.MathJax.typesetPromise) {
-						setTimeout(waitForMathJax, 50);
-						return;
-					}
-					window.MathJax.typesetPromise();
-				};
-				waitForMathJax();
+			const requestMathTypeset = (timeoutMs = 2000) => {
+				return new Promise((resolve) => {
+					const startedAt = Date.now();
+					const waitForMathJax = () => {
+						if (!window.MathJax || !window.MathJax.typesetPromise) {
+							if (Date.now() - startedAt >= timeoutMs) {
+								resolve();
+								return;
+							}
+							setTimeout(waitForMathJax, 50);
+							return;
+						}
+						window.MathJax
+							.typesetPromise()
+							.then(() => resolve())
+							.catch(() => resolve());
+					};
+					waitForMathJax();
+				});
+			};
+
+			const waitForImages = (root, timeoutMs = 1500) => {
+				if (!root) {
+					return Promise.resolve();
+				}
+				const images = Array.from(root.querySelectorAll('img'))
+					.filter((img) => !img.complete);
+				if (images.length === 0) {
+					return Promise.resolve();
+				}
+				const imagePromises = images.map((img) => new Promise((resolve) => {
+					const done = () => resolve();
+					img.addEventListener('load', done, { once: true });
+					img.addEventListener('error', done, { once: true });
+				}));
+				return Promise.race([
+					Promise.all(imagePromises),
+					new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+				]);
+			};
+
+			const waitForFonts = () => {
+				if (document.fonts && document.fonts.ready) {
+					return document.fonts.ready.catch(() => {});
+				}
+				return Promise.resolve();
+			};
+
+			// 画像/数式/フォントが落ち着くまで待ってから分割する
+			const waitForStableLayout = async () => {
+				if (!contentEl) {
+					return;
+				}
+				await Promise.all([
+					waitForImages(contentEl, 1800),
+					waitForFonts(),
+					requestMathTypeset(2000),
+				]);
 			};
 
 			const enhanceContent = () => {
@@ -2567,7 +2623,7 @@ export default class LocalServerPlugin extends Plugin {
 					wrapper.appendChild(table);
 				});
 
-				requestMathTypeset();
+				void requestMathTypeset();
 			};
 
 			const buildPagebook = (preserveIndex) => {
@@ -2576,122 +2632,174 @@ export default class LocalServerPlugin extends Plugin {
 					return;
 				}
 				const savedIndex = preserveIndex ? pagebookState.currentIndex : 0;
+				const buildToken = ++pagebookBuildToken;
 				contentEl.classList.add('is-paged');
 				contentEl.innerHTML = baseContentHtml;
 				enhanceContent();
 
-				const nodes = Array.from(contentEl.childNodes);
-				const pagebook = document.createElement('div');
-				pagebook.className = 'pagebook';
-
-				const viewport = document.createElement('div');
-				viewport.className = 'pagebook-viewport';
-				viewport.setAttribute('tabindex', '0');
-
-				const track = document.createElement('div');
-				track.className = 'pagebook-track';
-				viewport.appendChild(track);
-
-				const controls = document.createElement('div');
-				controls.className = 'pagebook-controls';
-
-				const prevButton = document.createElement('button');
-				prevButton.type = 'button';
-				prevButton.className = 'pagebook-button pagebook-prev';
-				prevButton.textContent = '◀';
-
-				const indicator = document.createElement('span');
-				indicator.className = 'pagebook-indicator';
-
-				const nextButton = document.createElement('button');
-				nextButton.type = 'button';
-				nextButton.className = 'pagebook-button pagebook-next';
-				nextButton.textContent = '▶';
-
-				controls.appendChild(prevButton);
-				controls.appendChild(indicator);
-				controls.appendChild(nextButton);
-
-				pagebook.appendChild(viewport);
-				pagebook.appendChild(controls);
-
-				contentEl.innerHTML = '';
-				contentEl.appendChild(pagebook);
-
-				const headerVisible = document.body.classList.contains('header-reveal');
-				const headerRect = headerVisible && headerEl ? headerEl.getBoundingClientRect() : null;
-				const topOffset = headerRect ? headerRect.bottom : 0;
-				const availableHeight = Math.max(360, window.innerHeight - topOffset - 6);
-				const desiredSingleWidth = widthInput instanceof HTMLInputElement
-					? Math.min(2000, Math.max(480, Number.parseInt(widthInput.value || '', 10) || 900))
-					: 900;
-				const layout = computeLayout(desiredSingleWidth, pagebookState.spread);
-
-				contentEl.style.setProperty('--pagebook-gap', layout.gap + 'px');
-				contentEl.style.setProperty('--pagebook-columns', String(layout.columns));
-				contentEl.style.setProperty('--pagebook-page-width', layout.singleWidth + 'px');
-				contentEl.style.setProperty('--pagebook-page-height', availableHeight + 'px');
-
-				updatePageMaxWidth(desiredSingleWidth, pagebookState.spread);
-				const columns = layout.columns;
-				const gap = layout.gap;
-				const pageWidth = layout.singleWidth;
-
-				const createPage = () => {
-					const page = document.createElement('section');
-					page.className = 'pagebook-page';
-					page.style.height = availableHeight + 'px';
-					return page;
-				};
-
-				let currentPage = createPage();
-				track.appendChild(currentPage);
-
-				nodes.forEach((node) => {
-					if (node.nodeType === Node.TEXT_NODE && !(node.textContent || '').trim()) {
+				waitForStableLayout().then(() => {
+					if (!pagebookState.enabled || buildToken !== pagebookBuildToken) {
 						return;
 					}
-					currentPage.appendChild(node);
-					if (currentPage.scrollHeight > availableHeight) {
-						currentPage.removeChild(node);
-						// 単体で収まりきらない要素はそのページでスクロールを許可する。
-						if (currentPage.childNodes.length === 0) {
-							currentPage.appendChild(node);
-							currentPage.classList.add('is-overflow');
-						} else {
-							currentPage = createPage();
-							track.appendChild(currentPage);
+
+					const nodes = Array.from(contentEl.children);
+					const pagebook = document.createElement('div');
+					pagebook.className = 'pagebook';
+
+					const viewport = document.createElement('div');
+					viewport.className = 'pagebook-viewport';
+					viewport.setAttribute('tabindex', '0');
+
+					const track = document.createElement('div');
+					track.className = 'pagebook-track';
+					viewport.appendChild(track);
+
+					const controls = document.createElement('div');
+					controls.className = 'pagebook-controls';
+
+					const prevButton = document.createElement('button');
+					prevButton.type = 'button';
+					prevButton.className = 'pagebook-button pagebook-prev';
+					prevButton.textContent = '◀';
+
+					const indicator = document.createElement('span');
+					indicator.className = 'pagebook-indicator';
+
+					const nextButton = document.createElement('button');
+					nextButton.type = 'button';
+					nextButton.className = 'pagebook-button pagebook-next';
+					nextButton.textContent = '▶';
+
+					controls.appendChild(prevButton);
+					controls.appendChild(indicator);
+					controls.appendChild(nextButton);
+
+					pagebook.appendChild(viewport);
+					pagebook.appendChild(controls);
+
+					contentEl.innerHTML = '';
+					contentEl.appendChild(pagebook);
+
+					const headerVisible = document.body.classList.contains('header-reveal');
+					const headerRect = headerVisible && headerEl ? headerEl.getBoundingClientRect() : null;
+					const topOffset = headerRect ? headerRect.bottom : 0;
+					const availableHeight = Math.max(360, window.innerHeight - topOffset - 6);
+					const desiredSingleWidth = widthInput instanceof HTMLInputElement
+						? Math.min(2000, Math.max(480, Number.parseInt(widthInput.value || '', 10) || 900))
+						: 900;
+					const layout = computeLayout(desiredSingleWidth, pagebookState.spread);
+
+					contentEl.style.setProperty('--pagebook-gap', layout.gap + 'px');
+					contentEl.style.setProperty('--pagebook-columns', String(layout.columns));
+					contentEl.style.setProperty('--pagebook-page-width', layout.singleWidth + 'px');
+					contentEl.style.setProperty('--pagebook-page-height', availableHeight + 'px');
+
+					updatePageMaxWidth(desiredSingleWidth, pagebookState.spread);
+					const columns = layout.columns;
+					const gap = layout.gap;
+					const pageWidth = layout.singleWidth;
+
+					const createPage = () => {
+						const page = document.createElement('section');
+						page.className = 'pagebook-page';
+						page.style.height = availableHeight + 'px';
+						return page;
+					};
+
+					let currentPage = createPage();
+					track.appendChild(currentPage);
+
+					for (let i = 0; i < nodes.length; i++) {
+						const node = nodes[i];
+						if (!node) {
+							continue;
+						}
+
+						const isHeading = isHeadingElement(node);
+						const nextNode = i + 1 < nodes.length ? nodes[i + 1] : null;
+
+						if (isHeading && nextNode) {
+							// 見出しがページ末に孤立しないよう、次の要素と一緒に収まるかを見る。
 							currentPage.appendChild(node);
 							if (currentPage.scrollHeight > availableHeight) {
+								currentPage.removeChild(node);
+								currentPage = createPage();
+								track.appendChild(currentPage);
+								currentPage.appendChild(node);
+								if (currentPage.scrollHeight > availableHeight) {
+									currentPage.classList.add('is-overflow');
+								}
+								continue;
+							}
+
+							currentPage.appendChild(nextNode);
+							const fitsWithNext = currentPage.scrollHeight <= availableHeight;
+							currentPage.removeChild(nextNode);
+
+							if (!fitsWithNext && currentPage.childNodes.length > 0) {
+								currentPage.removeChild(node);
+								currentPage = createPage();
+								track.appendChild(currentPage);
+								currentPage.appendChild(node);
+								if (currentPage.scrollHeight > availableHeight) {
+									currentPage.classList.add('is-overflow');
+								}
+							}
+							continue;
+						}
+
+						currentPage.appendChild(node);
+						if (currentPage.scrollHeight > availableHeight) {
+							currentPage.removeChild(node);
+
+							// 見出しだけのページになりそうなら、同じページに残してスクロールを許可する。
+							const headingOnly = currentPage.childNodes.length === 1
+								&& isHeadingElement(currentPage.firstElementChild);
+							if (headingOnly) {
+								currentPage.appendChild(node);
 								currentPage.classList.add('is-overflow');
+								continue;
+							}
+
+							// 単体で収まりきらない要素はそのページでスクロールを許可する。
+							if (currentPage.childNodes.length === 0) {
+								currentPage.appendChild(node);
+								currentPage.classList.add('is-overflow');
+							} else {
+								currentPage = createPage();
+								track.appendChild(currentPage);
+								currentPage.appendChild(node);
+								if (currentPage.scrollHeight > availableHeight) {
+									currentPage.classList.add('is-overflow');
+								}
 							}
 						}
 					}
+
+					pagebookState.pageCount = track.children.length;
+
+					const setPage = (index) => {
+						const maxIndex = Math.max(0, pagebookState.pageCount - columns);
+						const clamped = Math.min(Math.max(0, index), maxIndex);
+						pagebookState.currentIndex = clamped;
+						const step = pageWidth + gap;
+						const offset = -clamped * step;
+						track.style.transform = 'translateX(' + offset + 'px)';
+						const start = clamped + 1;
+						const end = Math.min(clamped + columns, pagebookState.pageCount);
+						indicator.textContent = start === end
+							? String(start) + ' / ' + String(pagebookState.pageCount)
+							: String(start) + '-' + String(end) + ' / ' + String(pagebookState.pageCount);
+						prevButton.disabled = clamped <= 0;
+						nextButton.disabled = clamped >= maxIndex;
+					};
+
+					pagebookState.setPage = setPage;
+					prevButton.addEventListener('click', () => setPage(pagebookState.currentIndex - columns));
+					nextButton.addEventListener('click', () => setPage(pagebookState.currentIndex + columns));
+
+					setPage(savedIndex);
 				});
-
-				pagebookState.pageCount = track.children.length;
-
-				const setPage = (index) => {
-					const maxIndex = Math.max(0, pagebookState.pageCount - columns);
-					const clamped = Math.min(Math.max(0, index), maxIndex);
-					pagebookState.currentIndex = clamped;
-					const step = pageWidth + gap;
-					const offset = -clamped * step;
-					track.style.transform = 'translateX(' + offset + 'px)';
-					const start = clamped + 1;
-					const end = Math.min(clamped + columns, pagebookState.pageCount);
-					indicator.textContent = start === end
-						? String(start) + ' / ' + String(pagebookState.pageCount)
-						: String(start) + '-' + String(end) + ' / ' + String(pagebookState.pageCount);
-					prevButton.disabled = clamped <= 0;
-					nextButton.disabled = clamped >= maxIndex;
-				};
-
-				pagebookState.setPage = setPage;
-				prevButton.addEventListener('click', () => setPage(pagebookState.currentIndex - columns));
-				nextButton.addEventListener('click', () => setPage(pagebookState.currentIndex + columns));
-
-				setPage(savedIndex);
 			};
 
 			const disablePagebook = () => {
