@@ -2281,7 +2281,7 @@ export default class LocalServerPlugin extends Plugin {
 		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: var(--font-mono); }
 		.content code { font-family: var(--font-mono); background: var(--inline-code-bg); padding: 0 4px; border-radius: 4px; }
 		.content blockquote { margin: 1em 0; padding-left: 12px; border-left: 3px solid var(--blockquote-border); color: var(--blockquote-text); }
-		.content img { max-width: 100%; }
+		.content img { max-width: 80%; max-height: 70vh; height: auto; display: block; margin: 12px auto; }
 		.content a { color: var(--link); text-decoration: none; }
 		.content a:hover { text-decoration: underline; }
 		.content table { width: 100%; border-collapse: collapse; margin: 1.2em 0; }
