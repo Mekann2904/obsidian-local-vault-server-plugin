@@ -2429,6 +2429,105 @@ export default class LocalServerPlugin extends Plugin {
 				pageCount: 0,
 				setPage: null,
 			};
+			// Google Translate対応: DOMの変更を監視してレイアウトを再計算する
+			let observer = null;
+			let isRebuilding = false;
+			let observerDebounce = 0;
+
+			// ページ分割された状態から、元のコンテンツ（翻訳済み含む）を復元する
+			const restoreContentFromPages = () => {
+				const pages = document.querySelectorAll('.pagebook-page');
+				if (pages.length === 0) return '';
+
+				const tempContainer = document.createElement('div');
+
+				// 分割されたリストやコードブロックを結合するためのロジック
+				let lastSplitList = null;
+				let lastSplitCode = null;
+
+				pages.forEach((page) => {
+					const children = Array.from(page.childNodes);
+					children.forEach((node) => {
+						const clone = node.cloneNode(true);
+
+						// Split List Merger
+						if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains('split-list')) {
+							const tagName = node.tagName;
+							if (lastSplitList && lastSplitList.tagName === tagName) {
+								// Move children to previous list
+								const items = Array.from(clone.children);
+								items.forEach(item => lastSplitList.appendChild(item));
+								return; // Don't append this container
+							} else {
+								lastSplitList = clone;
+							}
+						} else {
+							lastSplitList = null;
+						}
+
+						// Split Code Merger
+						if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains('split-code')) {
+							if (lastSplitCode) {
+								const newCode = clone.querySelector('code');
+								const prevCode = lastSplitCode.querySelector('code');
+								if (newCode && prevCode) {
+									// Syntax Highlightingを維持するため、テキスト結合ではなくノード移動を行う
+									prevCode.appendChild(document.createTextNode('\n'));
+									while (newCode.firstChild) {
+										prevCode.appendChild(newCode.firstChild);
+									}
+								}
+								return; // Don't append
+							} else {
+								lastSplitCode = clone;
+							}
+						} else {
+							lastSplitCode = null;
+						}
+
+						tempContainer.appendChild(clone);
+					});
+				});
+
+				return tempContainer.innerHTML;
+			};
+
+			const setupObserver = () => {
+				if (observer) observer.disconnect();
+				if (!contentEl) return;
+
+				observer = new MutationObserver((mutations) => {
+					if (isRebuilding) return;
+					if (!pagebookState.enabled) {
+						// 通常モード時はそのままベースを更新
+						baseContentHtml = contentEl.innerHTML;
+						return;
+					}
+
+					// 翻訳などの変更が落ち着くまで待つ (Debounce)
+					if (observerDebounce) clearTimeout(observerDebounce);
+					observerDebounce = window.setTimeout(() => {
+						if (isRebuilding) return;
+
+						// ページ分割モード有効時は、分割されたページから最新のHTMLを吸い上げる
+						// 変更があった場合、ベースHTMLを更新して再レイアウト
+						const newHtml = restoreContentFromPages();
+
+						if (newHtml) {
+							baseContentHtml = newHtml;
+							refreshPagebook();
+						}
+					}, 800);
+				});
+
+				observer.observe(contentEl, {
+					childList: true,
+					subtree: true,
+					characterData: true,
+					attributes: true
+				});
+			};
+
 			// 非同期レイアウト待ちの競合を避けるためのトークン
 			let pagebookBuildToken = 0;
 			// 画面サイズが本当に変わったときだけ再計算する
@@ -2932,6 +3031,11 @@ export default class LocalServerPlugin extends Plugin {
 				if (!contentEl) {
 					return;
 				}
+
+				// 監視を一時停止
+				if (observer) observer.disconnect();
+				isRebuilding = true;
+
 				const savedIndex = preserveIndex ? pagebookState.currentIndex : 0;
 				const buildToken = ++pagebookBuildToken;
 				contentEl.classList.add('is-paged');
@@ -2940,6 +3044,8 @@ export default class LocalServerPlugin extends Plugin {
 
 				waitForStableLayout().then(() => {
 					if (!pagebookState.enabled || buildToken !== pagebookBuildToken) {
+						isRebuilding = false;
+						setupObserver(); // 監視再開
 						return;
 					}
 
@@ -3172,6 +3278,9 @@ export default class LocalServerPlugin extends Plugin {
 					nextButton.addEventListener('click', () => setPage(pagebookState.currentIndex + columns));
 
 					setPage(savedIndex);
+
+					isRebuilding = false;
+					setupObserver(); // 完了後に監視再開
 				});
 			};
 
@@ -3193,6 +3302,8 @@ export default class LocalServerPlugin extends Plugin {
 				contentEl.classList.remove('is-paged');
 				contentEl.innerHTML = baseContentHtml;
 				enhanceContent();
+				// 監視は setupObserver 内のロジックで通常モードとして継続されるが、念のため再設定
+				setupObserver();
 			};
 
 			const enablePagebook = (spreadMode) => {
@@ -3405,6 +3516,7 @@ export default class LocalServerPlugin extends Plugin {
 			enhanceContent();
 			if (contentEl) {
 				baseContentHtml = contentEl.innerHTML;
+				setupObserver(); // 初期化時に監視開始
 			}
 
 			const applySpreadState = (enabled) => {
