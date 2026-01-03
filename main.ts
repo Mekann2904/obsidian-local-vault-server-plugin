@@ -1942,26 +1942,26 @@ export default class LocalServerPlugin extends Plugin {
 			--font-math: "XITS Math", "STIX Two Math", "Cambria Math", "Latin Modern Math", serif;
 			--page-max-width: 900px;
 			--page-single-width: 900px;
-			--page-padding-x: 20px;
+			--page-padding-x: 40px; /* 余白を広げて論文らしく */
 			--content-font-size: 16px;
-			--page-bg: #fbfbf9;
-			--page-text: #1f1f1f;
-			--surface: #ffffff;
-			--surface-muted: #f7f7f3;
-			--border: #e1e1dc;
-			--border-strong: #ececec;
-			--shadow: 0 1px 2px rgba(0,0,0,0.03);
-			--menu-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
-			--text-muted: #6b6b6b;
-			--text-subtle: #8a8a83;
-			--link: #1d4ed8;
-			--code-bg: #f6f6f4;
-			--code-border: #e5e5e1;
-			--inline-code-bg: rgba(0,0,0,0.05);
-			--blockquote-border: #d9d9d4;
-			--blockquote-text: #4f4f4f;
-			--table-border: #e3e3df;
-			--table-header-bg: #f5f5f2;
+			--page-bg: #ffffff; /* 純白の背景 */
+			--page-text: #222222;
+			--surface: #f8f8f8;
+			--surface-muted: #eeeeee;
+			--border: #dddddd;
+			--border-strong: #cccccc;
+			--shadow: 0 2px 4px rgba(0,0,0,0.05);
+			--menu-shadow: 0 12px 30px rgba(0, 0, 0, 0.1);
+			--text-muted: #666666;
+			--text-subtle: #888888;
+			--link: #0056b3;
+			--code-bg: #f5f5f5;
+			--code-border: #e0e0e0;
+			--inline-code-bg: rgba(0,0,0,0.04);
+			--blockquote-border: #cccccc;
+			--blockquote-text: #555555;
+			--table-border: #dddddd;
+			--table-header-bg: #f9f9f9;
 			--accent-border: #bfc7f1;
 			--accent-text: #1d2f7a;
 			--accent-bg: #eef1ff;
@@ -1970,7 +1970,7 @@ export default class LocalServerPlugin extends Plugin {
 			--success-text: #1f7a4f;
 			--success-bg: #f0faf4;
 			--pagebook-gap: 0px;
-			--pagebook-page-height: 60vh;
+			--pagebook-page-height: 100vh;
 			--pagebook-page-width: 100%;
 			--pagebook-columns: 1;
 		}
@@ -2184,12 +2184,13 @@ export default class LocalServerPlugin extends Plugin {
 		.font-input:focus { outline: none; border-color: var(--accent-border); box-shadow: 0 0 0 2px var(--focus-ring); }
 		.content {
 			background: transparent;
-			padding: 28px 30px;
+			padding: 40px;
 			border-radius: 0;
 			border: none;
 			box-shadow: none;
 			font-size: var(--content-font-size);
-			line-height: 1.75;
+			line-height: 1.7; /* 論文らしい行間 */
+			text-align: justify; /* 両端揃え */
 		}
 		.content.is-paged {
 			background: transparent;
@@ -2197,6 +2198,7 @@ export default class LocalServerPlugin extends Plugin {
 			box-shadow: none;
 			padding: 0;
 		}
+		.content p { margin-bottom: 1em; text-align: justify; }
 		.pagebook {
 			display: grid;
 			gap: 12px;
@@ -2276,17 +2278,20 @@ export default class LocalServerPlugin extends Plugin {
 			padding: 4px 10px;
 			pointer-events: auto;
 		}
-		.content h1, .content h2, .content h3 { margin-top: 1.6em; }
+		.content h1, .content h2, .content h3 { margin-top: 1.8em; margin-bottom: 0.8em; font-family: var(--font-sans); }
+		.content h1 { font-size: 1.8em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+		.content h2 { font-size: 1.4em; }
+		.content h3 { font-size: 1.2em; }
 		/* 分割されたリストの見た目を整える */
-		.content .split-list { margin: 0; padding-left: 1.4em; }
-		.content .split-list > li { margin: 0.2em 0; }
+		.content .split-list { margin: 0; padding-left: 1.8em; }
+		.content .split-list > li { margin: 0.4em 0; }
 		/* 分割されたコードブロックの見た目を整える */
 		.content .split-code { margin: 0; }
-		.content pre { background: var(--code-bg); color: var(--page-text); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--code-border); overflow-x: auto; position: relative; }
-		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: var(--font-mono); }
-		.content code { font-family: var(--font-mono); background: var(--inline-code-bg); padding: 0 4px; border-radius: 4px; }
-		.content blockquote { margin: 1em 0; padding-left: 12px; border-left: 3px solid var(--blockquote-border); color: var(--blockquote-text); }
-		.content img { max-width: 80%; max-height: 70vh; height: auto; display: block; margin: 12px auto; }
+		.content pre { background: var(--code-bg); color: var(--page-text); padding: 12px 16px; border-radius: 4px; border: 1px solid var(--code-border); overflow-x: auto; position: relative; font-size: 0.9em; }
+		.content pre code { display: block; font-size: 13px; line-height: 1.5; font-family: var(--font-mono); }
+		.content code { font-family: var(--font-mono); background: var(--inline-code-bg); padding: 0.1em 0.4em; border-radius: 3px; font-size: 0.9em; }
+		.content blockquote { margin: 1.2em 0; padding-left: 1em; border-left: 4px solid var(--blockquote-border); color: var(--blockquote-text); font-style: italic; }
+		.content img { max-width: 100%; max-height: 65vh; height: auto; display: block; margin: 1.5em auto; }
 		.content a { color: var(--link); text-decoration: none; }
 		.content a:hover { text-decoration: underline; }
 		.content table { width: 100%; border-collapse: collapse; margin: 1.2em 0; }
@@ -2977,7 +2982,7 @@ export default class LocalServerPlugin extends Plugin {
 					contentEl.appendChild(pagebook);
 
 					// 固定ヘッダーの高さを引かず、改ページの過剰発生を抑える。
-					const reservedViewportPadding = 6;
+					const reservedViewportPadding = 20;
 					const availableHeight = Math.max(360, window.innerHeight - reservedViewportPadding);
 					const desiredSingleWidth = widthInput instanceof HTMLInputElement
 						? Math.min(2000, Math.max(480, Number.parseInt(widthInput.value || '', 10) || 900))
@@ -3003,7 +3008,8 @@ export default class LocalServerPlugin extends Plugin {
 
 					// 1行分を目安に、段落の分割許容ラインを決める。
 					const lineHeight = getContentLineHeight();
-					const minSplitHeight = Math.max(24, lineHeight > 0 ? lineHeight * 1.2 : 24);
+					// 分割後の断片が小さすぎると読みづらいため、最低でも2.5行分程度は確保する
+					const minSplitHeight = Math.max(48, lineHeight > 0 ? lineHeight * 2.5 : 48);
 
 					let currentPage = createPage();
 					track.appendChild(currentPage);
@@ -3019,7 +3025,8 @@ export default class LocalServerPlugin extends Plugin {
 
 						if (isHeading && nextNode) {
 							const hadContentBefore = currentPage.childNodes.length > 0;
-							const minContinuationHeight = minSplitHeight;
+							// 見出しの直後には、最低でも4行分程度の本文が続かない場合は改ページする（孤立見出し対策）
+							const minContinuationHeight = Math.max(80, lineHeight > 0 ? lineHeight * 4.0 : 80);
 
 							// 見出しがページ末に孤立しないよう、次の要素と一緒に収まるかを見る。
 							currentPage.appendChild(node);
