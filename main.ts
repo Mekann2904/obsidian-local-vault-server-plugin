@@ -2277,6 +2277,9 @@ export default class LocalServerPlugin extends Plugin {
 			pointer-events: auto;
 		}
 		.content h1, .content h2, .content h3 { margin-top: 1.6em; }
+		/* 分割されたリストの見た目を整える */
+		.content .split-list { margin: 0; padding-left: 1.4em; }
+		.content .split-list > li { margin: 0.2em 0; }
 		.content pre { background: var(--code-bg); color: var(--page-text); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--code-border); overflow-x: auto; position: relative; }
 		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: var(--font-mono); }
 		.content code { font-family: var(--font-mono); background: var(--inline-code-bg); padding: 0 4px; border-radius: 4px; }
@@ -2471,6 +2474,94 @@ export default class LocalServerPlugin extends Plugin {
 				}
 				const tag = node.tagName ? node.tagName.toUpperCase() : '';
 				return tag === 'P' || tag === 'LI' || tag === 'BLOCKQUOTE';
+			};
+
+			// リストを複数ページへ分割できるよう、1アイテム単位で切り出す
+			const cloneListContainer = (listEl) => {
+				const clone = listEl.cloneNode(false);
+				if (clone instanceof HTMLElement && clone.hasAttribute('id')) {
+					clone.removeAttribute('id');
+				}
+				clone.classList.add('split-list');
+				return clone;
+			};
+
+			const splitListIntoChunks = (listEl) => {
+				if (!listEl || listEl.nodeType !== Node.ELEMENT_NODE) {
+					return [];
+				}
+				const listTag = listEl.tagName ? listEl.tagName.toUpperCase() : '';
+				if (listTag !== 'UL' && listTag !== 'OL') {
+					return [listEl.cloneNode(true)];
+				}
+
+				const items = Array.from(listEl.children).filter((child) => {
+					return child.nodeType === Node.ELEMENT_NODE && child.tagName.toUpperCase() === 'LI';
+				});
+
+				if (items.length === 0) {
+					return [listEl.cloneNode(true)];
+				}
+
+				const isOrdered = listTag === 'OL';
+				const hasStart = isOrdered && listEl.hasAttribute('start');
+				const hasReversed = isOrdered && listEl.hasAttribute('reversed');
+				const rawStart = hasStart ? Number.parseInt(listEl.getAttribute('start') || '', 10) : NaN;
+				const baseStart = Number.isFinite(rawStart)
+					? rawStart
+					: (hasReversed ? items.length : 1);
+
+				return items.map((item, index) => {
+					const listClone = cloneListContainer(listEl);
+					if (isOrdered) {
+						const value = hasReversed ? baseStart - index : baseStart + index;
+						listClone.setAttribute('start', String(value));
+					}
+					listClone.appendChild(item.cloneNode(true));
+					return listClone;
+				});
+			};
+
+			// 改ページはブロック単位で行う（子要素だけに頼らない）
+			const collectPageNodes = (root) => {
+				const nodes = [];
+				const children = Array.from(root.childNodes);
+
+				children.forEach((child) => {
+					if (child.nodeType === Node.ELEMENT_NODE) {
+						const element = child;
+						const tag = element.tagName ? element.tagName.toUpperCase() : '';
+						if (tag === 'UL' || tag === 'OL') {
+							splitListIntoChunks(element).forEach((chunk) => nodes.push(chunk));
+							return;
+						}
+						nodes.push(element);
+						return;
+					}
+					if (child.nodeType === Node.TEXT_NODE) {
+						const text = child.textContent || '';
+						if (text.trim()) {
+							const wrapper = document.createElement('p');
+							wrapper.textContent = text;
+							nodes.push(wrapper);
+						}
+					}
+				});
+
+				return nodes;
+			};
+
+			// 見開きモードで「スクロールより改ページ」を優先したい要素
+			const isHardPageElement = (node) => {
+				if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+					return false;
+				}
+				const tag = node.tagName ? node.tagName.toUpperCase() : '';
+				return tag === 'PRE' || tag === 'UL' || tag === 'OL';
+			};
+
+			const shouldAvoidOverflow = (node) => {
+				return pagebookState.spread && isHardPageElement(node);
 			};
 
 			const getContentLineHeight = () => {
@@ -2761,7 +2852,7 @@ export default class LocalServerPlugin extends Plugin {
 						return;
 					}
 
-					const nodes = Array.from(contentEl.children);
+					const nodes = collectPageNodes(contentEl);
 					const pagebook = document.createElement('div');
 					pagebook.className = 'pagebook';
 
@@ -2868,34 +2959,40 @@ export default class LocalServerPlugin extends Plugin {
 							const fitsWithNext = currentPage.scrollHeight <= availableHeight;
 							currentPage.removeChild(nextNode);
 
-							if (!fitsWithNext) {
-								if (remainingAfterHeading >= minContinuationHeight && isSplittableElement(nextNode)) {
-									const split = splitElementToFit(nextNode, currentPage, availableHeight, currentPage.scrollHeight, minContinuationHeight);
-									if (split) {
-										currentPage.appendChild(split.head);
-										currentPage = createPage();
-										track.appendChild(currentPage);
-										currentPage.appendChild(split.tail);
-										if (currentPage.scrollHeight > availableHeight) {
-											currentPage.classList.add('is-overflow');
-										}
-										i += 1;
-										continue;
+						if (!fitsWithNext) {
+							const avoidOverflow = shouldAvoidOverflow(nextNode);
+							if (!avoidOverflow && remainingAfterHeading >= minContinuationHeight && isSplittableElement(nextNode)) {
+								const split = splitElementToFit(nextNode, currentPage, availableHeight, currentPage.scrollHeight, minContinuationHeight);
+								if (split) {
+									currentPage.appendChild(split.head);
+									currentPage = createPage();
+									track.appendChild(currentPage);
+									currentPage.appendChild(split.tail);
+									if (currentPage.scrollHeight > availableHeight) {
+										currentPage.classList.add('is-overflow');
 									}
-								}
-
-								if (!hadContentBefore || remainingAfterHeading >= minContinuationHeight) {
-									// 見出し直下に最低限の本文を残すため、次の要素を同じページでオーバーフロー許可にする。
-									currentPage.appendChild(nextNode);
-									currentPage.classList.add('is-overflow');
 									i += 1;
 									continue;
 								}
+							}
 
-								currentPage.removeChild(node);
-								currentPage = createPage();
-								track.appendChild(currentPage);
-								currentPage.appendChild(node);
+							if (!avoidOverflow && (!hadContentBefore || remainingAfterHeading >= minContinuationHeight)) {
+								// 見出し直下に最低限の本文を残すため、次の要素を同じページでオーバーフロー許可にする。
+								currentPage.appendChild(nextNode);
+								currentPage.classList.add('is-overflow');
+								i += 1;
+								continue;
+							}
+
+							if (avoidOverflow) {
+								// 見開きモードではスクロールを避けて次ページに送る。
+								continue;
+							}
+
+							currentPage.removeChild(node);
+							currentPage = createPage();
+							track.appendChild(currentPage);
+							currentPage.appendChild(node);
 								if (currentPage.scrollHeight > availableHeight) {
 									currentPage.classList.add('is-overflow');
 								}
@@ -2929,6 +3026,16 @@ export default class LocalServerPlugin extends Plugin {
 							const headingOnly = currentPage.childNodes.length === 1
 								&& isHeadingElement(currentPage.firstElementChild);
 							if (headingOnly) {
+								const avoidOverflow = shouldAvoidOverflow(node);
+								if (avoidOverflow) {
+									currentPage = createPage();
+									track.appendChild(currentPage);
+									currentPage.appendChild(node);
+									if (currentPage.scrollHeight > availableHeight) {
+										currentPage.classList.add('is-overflow');
+									}
+									continue;
+								}
 								currentPage.appendChild(node);
 								currentPage.classList.add('is-overflow');
 								continue;
