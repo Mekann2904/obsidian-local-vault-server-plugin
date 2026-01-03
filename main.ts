@@ -2280,6 +2280,8 @@ export default class LocalServerPlugin extends Plugin {
 		/* 分割されたリストの見た目を整える */
 		.content .split-list { margin: 0; padding-left: 1.4em; }
 		.content .split-list > li { margin: 0.2em 0; }
+		/* 分割されたコードブロックの見た目を整える */
+		.content .split-code { margin: 0; }
 		.content pre { background: var(--code-bg); color: var(--page-text); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--code-border); overflow-x: auto; position: relative; }
 		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: var(--font-mono); }
 		.content code { font-family: var(--font-mono); background: var(--inline-code-bg); padding: 0 4px; border-radius: 4px; }
@@ -2476,6 +2478,15 @@ export default class LocalServerPlugin extends Plugin {
 				return tag === 'P' || tag === 'LI' || tag === 'BLOCKQUOTE';
 			};
 
+			// コードブロックかどうかを判定する
+			const isCodeBlockElement = (node) => {
+				if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+					return false;
+				}
+				const tag = node.tagName ? node.tagName.toUpperCase() : '';
+				return tag === 'PRE';
+			};
+
 			// リストを複数ページへ分割できるよう、1アイテム単位で切り出す
 			const cloneListContainer = (listEl) => {
 				const clone = listEl.cloneNode(false);
@@ -2549,6 +2560,81 @@ export default class LocalServerPlugin extends Plugin {
 				});
 
 				return nodes;
+			};
+
+			// コードブロックを行単位で分割し、ページに収まるようにする
+			const cloneCodeBlockContainer = (preEl) => {
+				const clone = preEl.cloneNode(false);
+				if (clone instanceof HTMLElement && clone.hasAttribute('id')) {
+					clone.removeAttribute('id');
+				}
+				clone.classList.add('split-code');
+				return clone;
+			};
+
+			const buildCodeBlock = (preEl, lines, startIndex, endIndex) => {
+				const preClone = cloneCodeBlockContainer(preEl);
+				const codeSource = preEl.querySelector('code');
+				const codeClone = codeSource ? codeSource.cloneNode(false) : document.createElement('code');
+				codeClone.textContent = lines.slice(startIndex, endIndex).join('\\n');
+				preClone.appendChild(codeClone);
+				return preClone;
+			};
+
+			const splitCodeBlockToFit = (preEl, page, availableHeight, baseHeight, minHeadHeight) => {
+				if (!preEl || !page) {
+					return null;
+				}
+				const codeSource = preEl.querySelector('code');
+				const rawText = codeSource ? codeSource.textContent || '' : preEl.textContent || '';
+				const lines = rawText.split('\\n');
+				if (lines.length <= 1) {
+					return null;
+				}
+
+				let low = 1;
+				let high = lines.length - 1;
+				let best = null;
+
+				while (low <= high) {
+					const mid = Math.floor((low + high) / 2);
+					const head = buildCodeBlock(preEl, lines, 0, mid);
+					page.appendChild(head);
+					const fits = page.scrollHeight <= availableHeight;
+					const headHeight = page.scrollHeight - baseHeight;
+					page.removeChild(head);
+
+					if (fits && headHeight >= minHeadHeight) {
+						best = { splitIndex: mid };
+						low = mid + 1;
+					} else {
+						high = mid - 1;
+					}
+				}
+
+				if (!best) {
+					return null;
+				}
+
+				const splitIndex = best.splitIndex;
+				if (splitIndex <= 0 || splitIndex >= lines.length) {
+					return null;
+				}
+
+				return {
+					head: buildCodeBlock(preEl, lines, 0, splitIndex),
+					tail: buildCodeBlock(preEl, lines, splitIndex, lines.length),
+				};
+			};
+
+			const splitNodeToFit = (node, page, availableHeight, baseHeight, minHeadHeight) => {
+				if (isCodeBlockElement(node)) {
+					return splitCodeBlockToFit(node, page, availableHeight, baseHeight, minHeadHeight);
+				}
+				if (isSplittableElement(node)) {
+					return splitElementToFit(node, page, availableHeight, baseHeight, minHeadHeight);
+				}
+				return null;
 			};
 
 			// 見開きモードで「スクロールより改ページ」を優先したい要素
@@ -2961,8 +3047,8 @@ export default class LocalServerPlugin extends Plugin {
 
 						if (!fitsWithNext) {
 							const avoidOverflow = shouldAvoidOverflow(nextNode);
-							if (!avoidOverflow && remainingAfterHeading >= minContinuationHeight && isSplittableElement(nextNode)) {
-								const split = splitElementToFit(nextNode, currentPage, availableHeight, currentPage.scrollHeight, minContinuationHeight);
+							if (!avoidOverflow && remainingAfterHeading >= minContinuationHeight && (isSplittableElement(nextNode) || isCodeBlockElement(nextNode))) {
+								const split = splitNodeToFit(nextNode, currentPage, availableHeight, currentPage.scrollHeight, minContinuationHeight);
 								if (split) {
 									currentPage.appendChild(split.head);
 									currentPage = createPage();
@@ -3008,8 +3094,8 @@ export default class LocalServerPlugin extends Plugin {
 						if (currentPage.scrollHeight > availableHeight) {
 							currentPage.removeChild(node);
 
-							if (remainingHeight >= minSplitHeight && isSplittableElement(node)) {
-								const split = splitElementToFit(node, currentPage, availableHeight, baseHeight, minSplitHeight);
+							if (remainingHeight >= minSplitHeight && (isSplittableElement(node) || isCodeBlockElement(node))) {
+								const split = splitNodeToFit(node, currentPage, availableHeight, baseHeight, minSplitHeight);
 								if (split) {
 									currentPage.appendChild(split.head);
 									currentPage = createPage();
