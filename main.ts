@@ -2205,6 +2205,8 @@ export default class LocalServerPlugin extends Plugin {
 			width: min(100%, calc((var(--pagebook-page-width) * var(--pagebook-columns)) + (var(--pagebook-gap) * (var(--pagebook-columns) - 1))));
 			margin: 0 auto;
 			overflow: hidden;
+			position: relative;
+			outline: none;
 		}
 		.pagebook-track {
 			display: flex;
@@ -2225,33 +2227,54 @@ export default class LocalServerPlugin extends Plugin {
 		}
 		.pagebook-page.is-overflow { overflow: auto; }
 		.pagebook-controls {
+			position: absolute;
+			top: 0;
+			left: 0;
+			right: 0;
+			bottom: 0;
 			display: flex;
-			align-items: center;
-			justify-content: center;
-			gap: 10px;
+			align-items: stretch;
+			justify-content: space-between;
+			pointer-events: none;
+			z-index: 4;
 		}
 		.pagebook-button {
 			display: inline-flex;
 			align-items: center;
 			justify-content: center;
-			min-width: 34px;
-			height: 30px;
-			padding: 0 10px;
-			border-radius: 999px;
-			border: 1px solid var(--border);
-			background: var(--surface);
-			color: var(--page-text);
+			width: 56px;
+			height: 100%;
+			padding: 0;
+			border-radius: 0;
+			border: none;
+			background: transparent;
+			color: var(--text-muted);
 			font-family: var(--font-sans);
 			font-size: 12px;
 			cursor: pointer;
-			transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+			opacity: 0;
+			transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+			pointer-events: auto;
 		}
-		.pagebook-button:hover { border-color: var(--border-strong); background: var(--surface-muted); }
+		.pagebook-viewport:hover .pagebook-button { opacity: 1; }
+		.pagebook-button:hover { background: rgba(0, 0, 0, 0.06); color: var(--page-text); }
+		.pagebook-prev { border-top-left-radius: 12px; border-bottom-left-radius: 12px; }
+		.pagebook-next { border-top-right-radius: 12px; border-bottom-right-radius: 12px; }
+		:root[data-theme="dark"] .pagebook-button:hover { background: rgba(255, 255, 255, 0.06); }
 		.pagebook-button:disabled { opacity: 0.5; cursor: default; }
 		.pagebook-indicator {
 			font-family: var(--font-sans);
 			font-size: 12px;
 			color: var(--text-muted);
+			position: absolute;
+			bottom: 10px;
+			left: 50%;
+			transform: translateX(-50%);
+			background: var(--surface);
+			border: 1px solid var(--border);
+			border-radius: 999px;
+			padding: 4px 10px;
+			pointer-events: auto;
 		}
 		.content h1, .content h2, .content h3 { margin-top: 1.6em; }
 		.content pre { background: var(--code-bg); color: var(--page-text); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--code-border); overflow-x: auto; position: relative; }
@@ -2563,6 +2586,7 @@ export default class LocalServerPlugin extends Plugin {
 
 				const viewport = document.createElement('div');
 				viewport.className = 'pagebook-viewport';
+				viewport.setAttribute('tabindex', '0');
 
 				const track = document.createElement('div');
 				track.className = 'pagebook-track';
@@ -2573,16 +2597,16 @@ export default class LocalServerPlugin extends Plugin {
 
 				const prevButton = document.createElement('button');
 				prevButton.type = 'button';
-				prevButton.className = 'pagebook-button';
-				prevButton.textContent = 'Prev';
+				prevButton.className = 'pagebook-button pagebook-prev';
+				prevButton.textContent = '◀';
 
 				const indicator = document.createElement('span');
 				indicator.className = 'pagebook-indicator';
 
 				const nextButton = document.createElement('button');
 				nextButton.type = 'button';
-				nextButton.className = 'pagebook-button';
-				nextButton.textContent = 'Next';
+				nextButton.className = 'pagebook-button pagebook-next';
+				nextButton.textContent = '▶';
 
 				controls.appendChild(prevButton);
 				controls.appendChild(indicator);
