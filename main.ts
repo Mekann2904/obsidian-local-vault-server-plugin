@@ -1925,16 +1925,22 @@ export default class LocalServerPlugin extends Plugin {
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<title>${title}</title>
 	<style>
-		body { margin: 0; font-family: "Charter", "Iowan Old Style", "Georgia", "Times New Roman", serif; background: #fbfbf9; color: #1f1f1f; }
+		:root {
+			--font-serif: "Noto Serif CJK JP", "Noto Serif JP", "Noto Serif", "Source Serif 4", "Times New Roman", serif;
+			--font-sans: "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans", "Helvetica Neue", "Segoe UI", sans-serif;
+			--font-mono: "Ricty Diminished", "Ricty", "Menlo", "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+			--font-math: "XITS Math", "STIX Two Math", "Cambria Math", "Latin Modern Math", serif;
+		}
+		body { margin: 0; font-family: var(--font-serif); background: #fbfbf9; color: #1f1f1f; }
 		.page { max-width: 860px; margin: 0 auto; padding: 36px 20px 64px; }
 		.header { margin-bottom: 20px; }
-		.title { font-size: 18px; font-weight: 600; margin: 0 0 4px; font-family: "Helvetica Neue", "Segoe UI", sans-serif; }
-		.path { font-size: 12px; color: #6b6b6b; word-break: break-all; font-family: "Helvetica Neue", "Segoe UI", sans-serif; }
+		.title { font-size: 18px; font-weight: 600; margin: 0 0 4px; font-family: var(--font-sans); }
+		.path { font-size: 12px; color: #6b6b6b; word-break: break-all; font-family: var(--font-sans); }
 		.content { background: #fff; padding: 28px 30px; border-radius: 10px; border: 1px solid #ececec; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
 		.content h1, .content h2, .content h3 { margin-top: 1.6em; }
 		.content pre { background: #f6f6f4; color: #1f1f1f; padding: 12px 14px; border-radius: 8px; border: 1px solid #e5e5e1; overflow-x: auto; position: relative; }
-		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-		.content code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; background: rgba(0,0,0,0.05); padding: 0 4px; border-radius: 4px; }
+		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: var(--font-mono); }
+		.content code { font-family: var(--font-mono); background: rgba(0,0,0,0.05); padding: 0 4px; border-radius: 4px; }
 		.content blockquote { margin: 1em 0; padding-left: 12px; border-left: 3px solid #d9d9d4; color: #4f4f4f; }
 		.content img { max-width: 100%; }
 		.content a { color: #1d4ed8; text-decoration: none; }
@@ -1968,6 +1974,7 @@ export default class LocalServerPlugin extends Plugin {
 		.content pre:focus-within .code-copy-button { opacity: 0.9; transform: translateY(0); }
 		.content .code-copy-button:hover { opacity: 1; background: #f5f5f2; border-color: #cfcfc9; color: #2b2b2b; }
 		.content .code-copy-button.is-copied { border-color: #9ad1b3; color: #1f7a4f; background: #f0faf4; }
+		mjx-container { font-family: var(--font-math); }
 		.math-block { overflow-x: auto; }
 	</style>
 	<script>
