@@ -1982,21 +1982,27 @@ export default class LocalServerPlugin extends Plugin {
 			position: absolute;
 			top: calc(100% + 8px);
 			right: 0;
-			min-width: 280px;
+			min-width: 0;
+			width: min(320px, calc(100vw - 32px));
+			max-height: calc(100vh - 100px);
 			padding: 12px;
 			border-radius: 14px;
 			border: 1px solid #e3e3df;
 			background: #ffffff;
 			box-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
+			box-sizing: border-box;
+			overflow: auto;
+			--menu-shift-x: 0px;
+			--menu-shift-y: 0px;
 			opacity: 0;
-			transform: translateY(-6px);
+			transform: translate(var(--menu-shift-x), calc(var(--menu-shift-y) - 6px));
 			pointer-events: none;
 			transition: opacity 0.15s ease, transform 0.15s ease;
 			z-index: 10;
 		}
 		.menu-panel.is-open {
 			opacity: 1;
-			transform: translateY(0);
+			transform: translate(var(--menu-shift-x), var(--menu-shift-y));
 			pointer-events: auto;
 		}
 		.menu-title {
@@ -2103,8 +2109,10 @@ export default class LocalServerPlugin extends Plugin {
 		.content a { color: #1d4ed8; text-decoration: none; }
 		.content a:hover { text-decoration: underline; }
 		.content table { width: 100%; border-collapse: collapse; margin: 1.2em 0; }
-		.content th, .content td { border: 1px solid #e3e3df; padding: 8px 10px; text-align: left; }
+		.content th, .content td { border: 1px solid #e3e3df; padding: 8px 10px; text-align: left; vertical-align: top; word-break: break-word; }
 		.content th { background: #f5f5f2; font-weight: 600; }
+		.table-wrap { width: 100%; overflow-x: auto; }
+		.table-wrap table { min-width: 520px; }
 		.content .copy-code-button,
 		.content .code-block-flair,
 		.content .codeblock-copy,
@@ -2137,7 +2145,7 @@ export default class LocalServerPlugin extends Plugin {
 			.page { padding: 28px 16px 48px; }
 			.header-row { align-items: flex-start; }
 			.header-actions { top: 16px; right: 16px; }
-			.menu-panel { right: 0; left: auto; min-width: 240px; }
+			.menu-panel { right: 0; left: auto; width: calc(100vw - 32px); max-height: calc(100vh - 96px); }
 		}
 	</style>
 	<script>
@@ -2259,9 +2267,39 @@ export default class LocalServerPlugin extends Plugin {
 			}
 
 			if (menuToggle instanceof HTMLButtonElement && menuPanel instanceof HTMLElement) {
+				const clampMenuPanel = () => {
+					if (!menuPanel.classList.contains('is-open')) {
+						return;
+					}
+					menuPanel.style.setProperty('--menu-shift-x', '0px');
+					menuPanel.style.setProperty('--menu-shift-y', '0px');
+
+					const rect = menuPanel.getBoundingClientRect();
+					const padding = 8;
+					let shiftX = 0;
+					let shiftY = 0;
+
+					if (rect.right > window.innerWidth - padding) {
+						shiftX -= rect.right - (window.innerWidth - padding);
+					}
+					if (rect.left < padding) {
+						shiftX += padding - rect.left;
+					}
+					if (rect.bottom > window.innerHeight - padding) {
+						shiftY -= rect.bottom - (window.innerHeight - padding);
+					}
+					if (rect.top < padding) {
+						shiftY += padding - rect.top;
+					}
+
+					menuPanel.style.setProperty('--menu-shift-x', shiftX + 'px');
+					menuPanel.style.setProperty('--menu-shift-y', shiftY + 'px');
+				};
+
 				const openMenu = () => {
 					menuPanel.classList.add('is-open');
 					menuToggle.setAttribute('aria-expanded', 'true');
+					requestAnimationFrame(clampMenuPanel);
 				};
 				const closeMenu = () => {
 					menuPanel.classList.remove('is-open');
@@ -2289,6 +2327,10 @@ export default class LocalServerPlugin extends Plugin {
 					if (event.key === 'Escape') {
 						closeMenu();
 					}
+				});
+
+				window.addEventListener('resize', () => {
+					clampMenuPanel();
 				});
 			}
 
@@ -2378,6 +2420,17 @@ export default class LocalServerPlugin extends Plugin {
 				});
 
 				pre.appendChild(copyButton);
+			});
+
+			document.querySelectorAll('.content table').forEach((table) => {
+				const parent = table.parentElement;
+				if (parent && parent.classList.contains('table-wrap')) {
+					return;
+				}
+				const wrapper = document.createElement('div');
+				wrapper.className = 'table-wrap';
+				table.parentNode?.insertBefore(wrapper, table);
+				wrapper.appendChild(table);
 			});
 
 			function waitForMathJax() {
