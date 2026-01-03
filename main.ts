@@ -1925,22 +1925,49 @@ export default class LocalServerPlugin extends Plugin {
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<title>${title}</title>
 	<style>
-		body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; color: #222; }
-		.page { max-width: 860px; margin: 0 auto; padding: 32px 20px 48px; }
-		.header { margin-bottom: 24px; }
-		.title { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
-		.path { font-size: 12px; color: #666; word-break: break-all; }
-		.content { background: #fff; padding: 28px 32px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
+		body { margin: 0; font-family: "Charter", "Iowan Old Style", "Georgia", "Times New Roman", serif; background: #fbfbf9; color: #1f1f1f; }
+		.page { max-width: 860px; margin: 0 auto; padding: 36px 20px 64px; }
+		.header { margin-bottom: 20px; }
+		.title { font-size: 18px; font-weight: 600; margin: 0 0 4px; font-family: "Helvetica Neue", "Segoe UI", sans-serif; }
+		.path { font-size: 12px; color: #6b6b6b; word-break: break-all; font-family: "Helvetica Neue", "Segoe UI", sans-serif; }
+		.content { background: #fff; padding: 28px 30px; border-radius: 10px; border: 1px solid #ececec; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
 		.content h1, .content h2, .content h3 { margin-top: 1.6em; }
-		.content pre { background: #f0f0f0; padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
-		.content code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-		.content blockquote { margin: 1em 0; padding-left: 12px; border-left: 3px solid #ddd; color: #555; }
+		.content pre { background: #f6f6f4; color: #1f1f1f; padding: 12px 14px; border-radius: 8px; border: 1px solid #e5e5e1; overflow-x: auto; position: relative; }
+		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+		.content code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; background: rgba(0,0,0,0.05); padding: 0 4px; border-radius: 4px; }
+		.content blockquote { margin: 1em 0; padding-left: 12px; border-left: 3px solid #d9d9d4; color: #4f4f4f; }
 		.content img { max-width: 100%; }
-		.content a { color: #1b6ef3; text-decoration: none; }
+		.content a { color: #1d4ed8; text-decoration: none; }
 		.content a:hover { text-decoration: underline; }
 		.content table { width: 100%; border-collapse: collapse; margin: 1.2em 0; }
-		.content th, .content td { border: 1px solid #e0e0e0; padding: 8px 10px; text-align: left; }
-		.content th { background: #fafafa; font-weight: 600; }
+		.content th, .content td { border: 1px solid #e3e3df; padding: 8px 10px; text-align: left; }
+		.content th { background: #f5f5f2; font-weight: 600; }
+		.content .copy-code-button,
+		.content .code-block-flair,
+		.content .codeblock-copy,
+		.content .code-block-flair { display: none !important; }
+		.content pre.code-block { padding-top: 12px; }
+		.content .code-copy-button {
+			position: absolute;
+			top: 8px;
+			right: 8px;
+			width: 28px;
+			height: 28px;
+			border: 1px solid #dcdcd6;
+			border-radius: 6px;
+			background: #ffffff;
+			color: #6b6b6b;
+			display: grid;
+			place-items: center;
+			cursor: pointer;
+			opacity: 0;
+			transform: translateY(-4px);
+			transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+		}
+		.content pre:hover .code-copy-button,
+		.content pre:focus-within .code-copy-button { opacity: 0.9; transform: translateY(0); }
+		.content .code-copy-button:hover { opacity: 1; background: #f5f5f2; border-color: #cfcfc9; color: #2b2b2b; }
+		.content .code-copy-button.is-copied { border-color: #9ad1b3; color: #1f7a4f; background: #f0faf4; }
 		.math-block { overflow-x: auto; }
 	</style>
 	<script>
@@ -1964,6 +1991,53 @@ export default class LocalServerPlugin extends Plugin {
 			${renderedHtml}
 		</main>
 	</div>
+	<script>
+		(function() {
+			const removeSelectors = ['.copy-code-button', '.code-block-flair', '.codeblock-copy', '.code-block-flair'];
+			removeSelectors.forEach((selector) => {
+				document.querySelectorAll(selector).forEach((el) => el.remove());
+			});
+
+			document.querySelectorAll('pre').forEach((pre) => {
+				pre.classList.add('code-block');
+
+				pre.querySelectorAll('button').forEach((button) => {
+					button.remove();
+				});
+
+				const code = pre.querySelector('code');
+				if (!code) {
+					return;
+				}
+
+				const copyButton = document.createElement('button');
+				copyButton.type = 'button';
+				copyButton.className = 'code-copy-button';
+				copyButton.setAttribute('aria-label', 'Copy code');
+				copyButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 7a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V7zm-3 3a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-1h-2v1H5v-7h1V10H5z"/></svg>';
+
+				copyButton.addEventListener('click', async () => {
+					const text = code.innerText;
+					try {
+						await navigator.clipboard.writeText(text);
+					} catch (error) {
+						const temp = document.createElement('textarea');
+						temp.value = text;
+						temp.style.position = 'fixed';
+						temp.style.opacity = '0';
+						document.body.appendChild(temp);
+						temp.select();
+						document.execCommand('copy');
+						temp.remove();
+					}
+					copyButton.classList.add('is-copied');
+					setTimeout(() => copyButton.classList.remove('is-copied'), 1200);
+				});
+
+				pre.appendChild(copyButton);
+			});
+		})();
+	</script>
 </body>
 </html>`;
 	}
