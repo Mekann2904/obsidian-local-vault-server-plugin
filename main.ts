@@ -2004,10 +2004,41 @@ export default class LocalServerPlugin extends Plugin {
 		body { margin: 0; font-family: var(--font-serif); background: var(--page-bg); color: var(--page-text); }
 		body.is-paged { overflow: hidden; }
 		.page { max-width: var(--page-max-width); margin: 0 auto; padding: 36px var(--page-padding-x) 64px; transition: max-width 0.2s ease; }
-		.page.is-paged { padding-top: 20px; padding-bottom: 28px; }
+		.page.is-paged { padding-top: 0; padding-bottom: 8px; }
 		.page.is-full { max-width: 100%; }
 		.header { margin-bottom: 20px; }
 		.header.is-paged { margin-bottom: 12px; }
+		.header-hover-zone {
+			position: fixed;
+			top: 0;
+			left: 0;
+			right: 0;
+			height: 16px;
+			z-index: 14;
+			display: none;
+		}
+		body.is-paged .header-hover-zone { display: block; }
+		body.is-paged .header {
+			position: fixed;
+			top: 0;
+			left: 0;
+			right: 0;
+			margin: 0;
+			padding: 12px var(--page-padding-x) 10px;
+			background: var(--page-bg);
+			box-shadow: var(--shadow);
+			transform: translateY(-110%);
+			opacity: 0;
+			pointer-events: none;
+			transition: transform 0.2s ease, opacity 0.2s ease;
+			z-index: 15;
+		}
+		body.is-paged.header-reveal .header,
+		body.is-paged .header:hover {
+			transform: translateY(0);
+			opacity: 1;
+			pointer-events: auto;
+		}
 		.header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 		.header-title { min-width: 0; }
 		.header-actions {
@@ -2285,6 +2316,7 @@ export default class LocalServerPlugin extends Plugin {
 	<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 </head>
 <body>
+	<div class="header-hover-zone" aria-hidden="true"></div>
 	<div class="page">
 		<header class="header">
 			<div class="header-row">
@@ -2355,6 +2387,7 @@ export default class LocalServerPlugin extends Plugin {
 			const menuPanel = document.querySelector('.menu-panel');
 			const contentEl = document.querySelector('.content');
 			const headerEl = document.querySelector('.header');
+			const headerHoverZone = document.querySelector('.header-hover-zone');
 			let baseContentHtml = contentEl ? contentEl.innerHTML : '';
 			const pagebookState = {
 				enabled: false,
@@ -2561,9 +2594,10 @@ export default class LocalServerPlugin extends Plugin {
 				contentEl.innerHTML = '';
 				contentEl.appendChild(pagebook);
 
-				const headerRect = headerEl ? headerEl.getBoundingClientRect() : null;
+				const headerVisible = document.body.classList.contains('header-reveal');
+				const headerRect = headerVisible && headerEl ? headerEl.getBoundingClientRect() : null;
 				const topOffset = headerRect ? headerRect.bottom : 0;
-				const availableHeight = Math.max(360, window.innerHeight - topOffset - 16);
+				const availableHeight = Math.max(360, window.innerHeight - topOffset - 6);
 				const desiredSingleWidth = widthInput instanceof HTMLInputElement
 					? Math.min(2000, Math.max(480, Number.parseInt(widthInput.value || '', 10) || 900))
 					: 900;
@@ -2641,6 +2675,7 @@ export default class LocalServerPlugin extends Plugin {
 				pagebookState.spread = false;
 				pagebookState.setPage = null;
 				document.body.classList.remove('is-paged');
+				document.body.classList.remove('header-reveal');
 				if (pageEl) {
 					pageEl.classList.remove('is-paged');
 				}
@@ -2659,6 +2694,7 @@ export default class LocalServerPlugin extends Plugin {
 				pagebookState.enabled = true;
 				pagebookState.spread = spreadMode;
 				document.body.classList.add('is-paged');
+				document.body.classList.remove('header-reveal');
 				if (pageEl) {
 					pageEl.classList.add('is-paged');
 				}
@@ -2780,6 +2816,42 @@ export default class LocalServerPlugin extends Plugin {
 
 				window.addEventListener('resize', () => {
 					clampMenuPanel();
+				});
+			}
+
+			if (headerEl && headerHoverZone) {
+				const showHeader = () => {
+					if (!pagebookState.enabled) {
+						return;
+					}
+					document.body.classList.add('header-reveal');
+					refreshPagebook();
+				};
+				const hideHeader = () => {
+					if (!pagebookState.enabled) {
+						return;
+					}
+					document.body.classList.remove('header-reveal');
+					refreshPagebook();
+				};
+
+				headerHoverZone.addEventListener('mouseenter', () => {
+					showHeader();
+				});
+				headerHoverZone.addEventListener('mouseleave', () => {
+					if (headerEl.matches(':hover')) {
+						return;
+					}
+					hideHeader();
+				});
+				headerEl.addEventListener('mouseenter', () => {
+					showHeader();
+				});
+				headerEl.addEventListener('mouseleave', () => {
+					if (headerHoverZone.matches(':hover')) {
+						return;
+					}
+					hideHeader();
 				});
 			}
 
