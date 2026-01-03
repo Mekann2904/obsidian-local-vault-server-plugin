@@ -28,6 +28,7 @@ const DEFAULT_INDEX_EXTENSIONS = new Set([
 ]);
 const MARKDOWN_PREVIEW_QUERY_KEY = 'preview';
 const MARKDOWN_PREVIEW_ENDPOINT = '/__markdown-preview';
+const MARKDOWN_PREVIEW_ASSET_ENDPOINT = '/__markdown-asset';
 const MARKDOWN_PREVIEW_TOKEN_TTL_MS = 2 * 60 * 1000;
 
 /**
@@ -298,6 +299,22 @@ export default class LocalServerPlugin extends Plugin {
 		return ext === '.md' || ext === '.markdown' || ext === '.mdown';
 	}
 
+	private isImageFile(filePath: string): boolean {
+		const ext = path.extname(filePath).toLowerCase();
+		return [
+			'.png',
+			'.jpg',
+			'.jpeg',
+			'.gif',
+			'.webp',
+			'.avif',
+			'.bmp',
+			'.tif',
+			'.tiff',
+			'.svg',
+		].includes(ext);
+	}
+
 	private findRunningServerForPreview(): RunningServerInfo | null {
 		const candidates = Array.from(this.runningServers.values())
 			.filter((info) => info.status === 'running' && info.server);
@@ -340,6 +357,237 @@ export default class LocalServerPlugin extends Plugin {
 		const baseUrl = this.buildBaseUrl(entry);
 		const cacheBust = Date.now().toString();
 		return `${baseUrl}${MARKDOWN_PREVIEW_ENDPOINT}?token=${token}&ts=${cacheBust}`;
+	}
+
+	private buildMarkdownAssetUrl(entry: ServerEntrySettings, token: string, vaultPath: string): string {
+		const baseUrl = this.buildBaseUrl(entry);
+		const encodedPath = encodeURIComponent(vaultPath);
+		return `${baseUrl}${MARKDOWN_PREVIEW_ASSET_ENDPOINT}?token=${token}&path=${encodedPath}`;
+	}
+
+	private isExternalUrl(url: string): boolean {
+		return /^https?:\/\//i.test(url) || /^data:/i.test(url) || /^blob:/i.test(url) || /^mailto:/i.test(url);
+	}
+
+	private extractVaultPathFromAppUrl(url: string): string | null {
+		try {
+			const parsed = new URL(url);
+			const decoded = decodeURIComponent(parsed.pathname);
+			const normalized = decoded.replace(/^\/+/, '');
+			const parts = normalized.split('/').filter(Boolean);
+			const vaultBasePath = this.getVaultBasePath();
+
+			const candidates: string[] = [];
+			if (parts.length > 1) {
+				candidates.push(parts.slice(1).join('/'));
+			}
+			if (normalized) {
+				candidates.push(normalized);
+			}
+			if (vaultBasePath && normalized) {
+				const absoluteCandidate = path.normalize(`/${normalized}`);
+				if (this.isPathInside(vaultBasePath, absoluteCandidate)) {
+					const relative = path.relative(vaultBasePath, absoluteCandidate);
+					candidates.unshift(relative.split(path.sep).join(path.posix.sep));
+				}
+			}
+
+			for (const candidate of candidates) {
+				const file = this.app.vault.getAbstractFileByPath(candidate);
+				if (file instanceof TFile) {
+					return candidate;
+				}
+			}
+
+			return candidates[0] ?? null;
+		} catch {
+			return null;
+		}
+	}
+
+	private resolveVaultAssetPath(src: string, sourcePath: string): string | null {
+		const cleaned = src.split('#')[0]?.split('?')[0] ?? '';
+		let decoded = cleaned;
+		if (cleaned) {
+			try {
+				decoded = decodeURIComponent(cleaned);
+			} catch {
+				decoded = cleaned;
+			}
+		}
+		if (!decoded) {
+			return null;
+		}
+		if (decoded.startsWith('app://') || decoded.startsWith('obsidian://')) {
+			const extracted = this.extractVaultPathFromAppUrl(decoded);
+			if (extracted) {
+				return extracted;
+			}
+		}
+		if (decoded.startsWith('/')) {
+			return decoded.replace(/^\/+/, '');
+		}
+		const dest = this.app.metadataCache.getFirstLinkpathDest(decoded, sourcePath);
+		if (dest instanceof TFile) {
+			return dest.path;
+		}
+		const sourceDir = path.posix.dirname(sourcePath);
+		const candidate = path.posix.normalize(path.posix.join(sourceDir, decoded));
+		const file = this.app.vault.getAbstractFileByPath(candidate);
+		if (file instanceof TFile) {
+			return file.path;
+		}
+		// メタデータ解決に失敗したときは、Vault 実パスを使って存在確認する。
+		const vaultBasePath = this.getVaultBasePath();
+		if (vaultBasePath) {
+			const absoluteCandidate = path.resolve(vaultBasePath, decoded);
+			try {
+				const resolved = fs.realpathSync(absoluteCandidate);
+				if (this.isPathInside(vaultBasePath, resolved)) {
+					const relative = path.relative(vaultBasePath, resolved);
+					const vaultRelative = relative.split(path.sep).join(path.posix.sep);
+					const fallbackFile = this.app.vault.getAbstractFileByPath(vaultRelative);
+					if (fallbackFile instanceof TFile) {
+						return fallbackFile.path;
+					}
+				}
+			} catch {
+				// ファイルが存在しない場合は無視する。
+			}
+		}
+		return null;
+	}
+
+	private rewriteMarkdownPreviewAssets(
+		container: HTMLElement,
+		sourcePath: string,
+		entry: ServerEntrySettings,
+		token: string
+	): void {
+		const images = Array.from(container.querySelectorAll('img'));
+		for (const img of images) {
+			const rawSrc = img.getAttribute('src') ?? '';
+			const dataSrc = img.getAttribute('data-src') ?? '';
+			const src = rawSrc || dataSrc;
+			if (!src || this.isExternalUrl(src)) {
+				continue;
+			}
+			const assetPath = this.resolveVaultAssetPath(src, sourcePath);
+			if (!assetPath) {
+				continue;
+			}
+			img.setAttribute('src', this.buildMarkdownAssetUrl(entry, token, assetPath));
+			if (dataSrc) {
+				img.removeAttribute('data-src');
+			}
+		}
+	}
+
+	private prepareMarkdownForPreview(markdown: string, sourcePath: string): {
+		markdown: string;
+		mathPlaceholders: Map<string, string>;
+	} {
+		const withEmbeds = this.replaceObsidianImageEmbeds(markdown, sourcePath);
+		const normalizedImages = this.normalizeMarkdownImageLinks(withEmbeds);
+		return this.extractMathPlaceholders(normalizedImages);
+	}
+
+	private replaceObsidianImageEmbeds(markdown: string, sourcePath: string): string {
+		return markdown.replace(/!\[\[([^\]]+)\]\]/g, (_match, inner: string) => {
+			const parts = inner.split('|');
+			const linkPath = (parts[0] ?? '').trim();
+			const altText = (parts[1] ?? path.posix.basename(linkPath)).trim();
+			if (!linkPath) {
+				return _match;
+			}
+			return `![${altText}](${linkPath})`;
+		});
+	}
+
+	private normalizeMarkdownImageLinks(markdown: string): string {
+		return markdown.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt: string, rawTarget: string) => {
+			const trimmed = rawTarget.trim();
+			if (!trimmed) {
+				return match;
+			}
+			let urlPart = trimmed;
+			let titlePart = '';
+			const titleMatch = trimmed.match(/\s+(".*?"|'.*?')\s*$/);
+			if (titleMatch && titleMatch.index !== undefined) {
+				titlePart = titleMatch[1];
+				urlPart = trimmed.slice(0, titleMatch.index).trim();
+			}
+			if (!urlPart || this.isExternalUrl(urlPart)) {
+				return match;
+			}
+			const encoded = this.encodeMarkdownUrl(urlPart);
+			if (encoded === urlPart) {
+				return match;
+			}
+			return `![${alt}](${encoded}${titlePart ? ` ${titlePart}` : ''})`;
+		});
+	}
+
+	private encodeMarkdownUrl(value: string): string {
+		return encodeURI(value).replace(/\(/g, '%28').replace(/\)/g, '%29');
+	}
+
+	private extractMathPlaceholders(markdown: string): {
+		markdown: string;
+		mathPlaceholders: Map<string, string>;
+	} {
+		const mathPlaceholders = new Map<string, string>();
+		let counter = 0;
+
+		const replaceWithPlaceholder = (content: string): string => {
+			const key = `@@MATH_${counter++}@@`;
+			mathPlaceholders.set(key, content);
+			return key;
+		};
+
+		const replaceMath = (input: string): string => {
+			let output = input;
+			const blockPatterns: Array<{ regex: RegExp; wrap: (value: string) => string }> = [
+				{ regex: /\$\$([\s\S]+?)\$\$/g, wrap: (value) => `$$${value}$$` },
+				{ regex: /\\\\\[((?:.|\n)+?)\\\\\]/g, wrap: (value) => `\\[${value}\\]` },
+			];
+			const inlinePatterns: Array<{ regex: RegExp; wrap: (value: string) => string }> = [
+				{ regex: /\\\\\((.+?)\\\\\)/g, wrap: (value) => `\\(${value}\\)` },
+				{ regex: /\$(?!\$)([^$\n]+?)\$(?!\$)/g, wrap: (value) => `$${value}$` },
+			];
+
+			for (const pattern of blockPatterns) {
+				output = output.replace(pattern.regex, (_match, value: string) => replaceWithPlaceholder(pattern.wrap(value)));
+			}
+			for (const pattern of inlinePatterns) {
+				output = output.replace(pattern.regex, (_match, value: string) => replaceWithPlaceholder(pattern.wrap(value)));
+			}
+			return output;
+		};
+
+		const fenceRegex = /(^```[\s\S]*?^```|^~~~[\s\S]*?^~~~)/gm;
+		const parts = markdown.split(fenceRegex);
+		const processed = parts
+			.map((part) => {
+				if (part.startsWith('```') || part.startsWith('~~~')) {
+					return part;
+				}
+				return replaceMath(part);
+			})
+			.join('');
+
+		return { markdown: processed, mathPlaceholders };
+	}
+
+	private restoreMathPlaceholders(container: HTMLElement, placeholders: Map<string, string>): void {
+		if (placeholders.size === 0) {
+			return;
+		}
+		let html = container.innerHTML;
+		for (const [key, value] of placeholders) {
+			html = html.split(key).join(value);
+		}
+		container.innerHTML = html;
 	}
 
 	private openExternalUrl(url: string): void {
@@ -854,6 +1102,7 @@ export default class LocalServerPlugin extends Plugin {
 			}
 
 			if (pathname === MARKDOWN_PREVIEW_ENDPOINT) {
+				// 一時トークン経由で Vault 内の Markdown をプレビューする専用エンドポイント。
 				const previewToken = searchParams?.get('token') ?? '';
 				const previewPath = this.resolvePreviewToken(previewToken);
 				if (!previewPath) {
@@ -884,7 +1133,63 @@ export default class LocalServerPlugin extends Plugin {
 					this.sendResponse(res, statusCode, 'Forbidden: Not a markdown file.', startTime, entry.name, req.method, req.url);
 					return;
 				}
-				void this.serveMarkdownPreview(res, previewPath, entry.name, startTime, req.method, req.url);
+				void this.serveMarkdownPreview(res, previewPath, entry, startTime, req.method, req.url, previewToken);
+				return;
+			}
+
+			if (pathname === MARKDOWN_PREVIEW_ASSET_ENDPOINT) {
+				// プレビュー HTML 内で参照される画像ファイルを安全に返す。
+				const previewToken = searchParams?.get('token') ?? '';
+				const previewPath = this.resolvePreviewToken(previewToken);
+				if (!previewPath) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden: Invalid or expired preview token.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				const assetPathRaw = searchParams?.get('path') ?? '';
+				let assetVaultPath: string;
+				try {
+					assetVaultPath = decodeURIComponent(assetPathRaw);
+				} catch {
+					statusCode = 400;
+					this.sendResponse(res, statusCode, 'Bad Request: Invalid asset path.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				const vaultBasePath = this.getVaultBasePath();
+				if (!vaultBasePath) {
+					statusCode = 503;
+					this.sendResponse(res, statusCode, 'Service Unavailable', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				const normalizedVaultPath = assetVaultPath.replace(/^\/+/, '');
+				const absoluteAssetPath = path.join(vaultBasePath, normalizedVaultPath);
+				let resolvedAssetPath: string;
+				try {
+					resolvedAssetPath = fs.realpathSync(absoluteAssetPath);
+				} catch {
+					statusCode = 404;
+					this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				if (!this.isPathInside(vaultBasePath, resolvedAssetPath)) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				if (!this.isImageFile(resolvedAssetPath)) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden: Not an image.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				let stats: fs.Stats;
+				try {
+					stats = fs.statSync(resolvedAssetPath);
+				} catch {
+					statusCode = 404;
+					this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				this.serveFile(res, resolvedAssetPath, stats, entry.name, startTime, req.method, req.url);
 				return;
 			}
 
@@ -988,7 +1293,7 @@ export default class LocalServerPlugin extends Plugin {
 						// preview=1 のときだけ Markdown を簡易HTMLで返す。
 						const previewRequested = searchParams?.get(MARKDOWN_PREVIEW_QUERY_KEY) === '1';
 						if (previewRequested && this.isMarkdownFile(resolvedPath)) {
-							void this.serveMarkdownPreview(res, resolvedPath, entry.name, startTime, req.method, req.url);
+							void this.serveMarkdownPreview(res, resolvedPath, entry, startTime, req.method, req.url);
 							return;
 						}
 						if (enforceVaultFiles && vaultBasePath && !this.isVaultFileResolvedPath(vaultBasePath, resolvedPath)) {
@@ -1555,14 +1860,20 @@ export default class LocalServerPlugin extends Plugin {
 	private async serveMarkdownPreview(
 		res: http.ServerResponse,
 		filePath: string,
-		entryName: string,
+		entry: ServerEntrySettings,
 		startTime: number,
 		method?: string,
-		url?: string
+		url?: string,
+		previewToken?: string
 	): Promise<void> {
 		try {
+			const vaultBasePath = this.getVaultBasePath();
+			const vaultRelative = vaultBasePath ? this.getVaultRelativePath(vaultBasePath, filePath) : null;
+			const sourcePath = vaultRelative ?? filePath;
 			const markdown = await fs.promises.readFile(filePath, 'utf8');
-			const html = await this.buildMarkdownPreviewHtml(markdown, filePath);
+			const token = previewToken ?? this.issuePreviewToken(filePath);
+			const prepared = this.prepareMarkdownForPreview(markdown, sourcePath);
+			const html = await this.buildMarkdownPreviewHtml(prepared.markdown, sourcePath, entry, token, prepared.mathPlaceholders);
 			const requestMethod = (method ?? 'GET').toUpperCase();
 
 			res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -1574,17 +1885,25 @@ export default class LocalServerPlugin extends Plugin {
 			} else {
 				res.end();
 			}
-			this.logRequest(startTime, 200, entryName, method, url, filePath);
+			this.logRequest(startTime, 200, entry.name, method, url, filePath);
 		} catch (error: any) {
-			this.log('error', `Markdown preview error for "${filePath}": ${error?.message ?? error}`, entryName);
-			this.sendResponse(res, 500, 'Internal Server Error', startTime, entryName, method, url, filePath);
+			this.log('error', `Markdown preview error for "${filePath}": ${error?.message ?? error}`, entry.name);
+			this.sendResponse(res, 500, 'Internal Server Error', startTime, entry.name, method, url, filePath);
 		}
 	}
 
-	private async buildMarkdownPreviewHtml(markdown: string, sourcePath: string): Promise<string> {
+	private async buildMarkdownPreviewHtml(
+		markdown: string,
+		sourcePath: string,
+		entry: ServerEntrySettings,
+		token: string,
+		mathPlaceholders: Map<string, string>
+	): Promise<string> {
 		const container = document.createElement('div');
 		const tempComponent = new Component();
 		await MarkdownRenderer.render(this.app, markdown, container, sourcePath, tempComponent);
+		this.rewriteMarkdownPreviewAssets(container, sourcePath, entry, token);
+		this.restoreMathPlaceholders(container, mathPlaceholders);
 		const renderedHtml = container.innerHTML;
 		// 一時コンポーネントを破棄してプレビュー用の子コンポーネントを回収する。
 		tempComponent.unload();
@@ -1619,7 +1938,21 @@ export default class LocalServerPlugin extends Plugin {
 		.content img { max-width: 100%; }
 		.content a { color: #1b6ef3; text-decoration: none; }
 		.content a:hover { text-decoration: underline; }
+		.content table { width: 100%; border-collapse: collapse; margin: 1.2em 0; }
+		.content th, .content td { border: 1px solid #e0e0e0; padding: 8px 10px; text-align: left; }
+		.content th { background: #fafafa; font-weight: 600; }
+		.math-block { overflow-x: auto; }
 	</style>
+	<script>
+		window.MathJax = {
+			tex: {
+				inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
+				displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']]
+			},
+			svg: { fontCache: 'global' }
+		};
+	</script>
+	<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
 </head>
 <body>
 	<div class="page">
