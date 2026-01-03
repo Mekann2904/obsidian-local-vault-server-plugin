@@ -2183,11 +2183,11 @@ export default class LocalServerPlugin extends Plugin {
 		}
 		.font-input:focus { outline: none; border-color: var(--accent-border); box-shadow: 0 0 0 2px var(--focus-ring); }
 		.content {
-			background: var(--surface);
+			background: transparent;
 			padding: 28px 30px;
-			border-radius: 10px;
-			border: 1px solid var(--border-strong);
-			box-shadow: var(--shadow);
+			border-radius: 0;
+			border: none;
+			box-shadow: none;
 			font-size: var(--content-font-size);
 			line-height: 1.75;
 		}
@@ -2219,10 +2219,10 @@ export default class LocalServerPlugin extends Plugin {
 			height: var(--pagebook-page-height);
 			padding: 18px 20px;
 			box-sizing: border-box;
-			background: var(--surface);
-			border: 1px solid var(--border-strong);
-			border-radius: 12px;
-			box-shadow: var(--shadow);
+			background: transparent;
+			border: none;
+			border-radius: 0;
+			box-shadow: none;
 			overflow: hidden;
 		}
 		.pagebook-page.is-overflow { overflow: auto; }
