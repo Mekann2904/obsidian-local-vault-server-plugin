@@ -1943,8 +1943,60 @@ export default class LocalServerPlugin extends Plugin {
 			--page-max-width: 900px;
 			--page-padding-x: 20px;
 			--content-font-size: 16px;
+			--page-bg: #fbfbf9;
+			--page-text: #1f1f1f;
+			--surface: #ffffff;
+			--surface-muted: #f7f7f3;
+			--border: #e1e1dc;
+			--border-strong: #ececec;
+			--shadow: 0 1px 2px rgba(0,0,0,0.03);
+			--menu-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
+			--text-muted: #6b6b6b;
+			--text-subtle: #8a8a83;
+			--link: #1d4ed8;
+			--code-bg: #f6f6f4;
+			--code-border: #e5e5e1;
+			--inline-code-bg: rgba(0,0,0,0.05);
+			--blockquote-border: #d9d9d4;
+			--blockquote-text: #4f4f4f;
+			--table-border: #e3e3df;
+			--table-header-bg: #f5f5f2;
+			--accent-border: #bfc7f1;
+			--accent-text: #1d2f7a;
+			--accent-bg: #eef1ff;
+			--focus-ring: rgba(191, 199, 241, 0.35);
+			--success-border: #9ad1b3;
+			--success-text: #1f7a4f;
+			--success-bg: #f0faf4;
 		}
-		body { margin: 0; font-family: var(--font-serif); background: #fbfbf9; color: #1f1f1f; }
+		:root[data-theme="dark"] {
+			--page-bg: #0f1112;
+			--page-text: #e7e6e3;
+			--surface: #16181b;
+			--surface-muted: #202326;
+			--border: #2a2f33;
+			--border-strong: #2f3439;
+			--shadow: 0 1px 2px rgba(0,0,0,0.4);
+			--menu-shadow: 0 12px 30px rgba(0,0,0,0.6);
+			--text-muted: #a0a0a0;
+			--text-subtle: #8b9096;
+			--link: #8ab4ff;
+			--code-bg: #1c1f22;
+			--code-border: #2b3136;
+			--inline-code-bg: rgba(255,255,255,0.08);
+			--blockquote-border: #3a4147;
+			--blockquote-text: #c5c8cc;
+			--table-border: #2f3439;
+			--table-header-bg: #1e2226;
+			--accent-border: #3f4a8a;
+			--accent-text: #d0d7ff;
+			--accent-bg: #1b2146;
+			--focus-ring: rgba(111, 123, 214, 0.45);
+			--success-border: #2f7d5e;
+			--success-text: #9de2c0;
+			--success-bg: #123025;
+		}
+		body { margin: 0; font-family: var(--font-serif); background: var(--page-bg); color: var(--page-text); }
 		.page { max-width: var(--page-max-width); margin: 0 auto; padding: 36px var(--page-padding-x) 64px; transition: max-width 0.2s ease; }
 		.page.is-full { max-width: 100%; }
 		.header { margin-bottom: 20px; }
@@ -1965,19 +2017,19 @@ export default class LocalServerPlugin extends Plugin {
 			gap: 8px;
 			padding: 6px 10px;
 			border-radius: 999px;
-			border: 1px solid #e1e1dc;
-			background: #fff;
-			color: #2b2b2b;
+			border: 1px solid var(--border);
+			background: var(--surface);
+			color: var(--page-text);
 			font-family: var(--font-sans);
 			font-size: 12px;
 			cursor: pointer;
 			transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 		}
-		.menu-toggle:hover { border-color: #cfcfc9; background: #f7f7f3; }
-		.menu-toggle:focus { outline: none; border-color: #bfc7f1; box-shadow: 0 0 0 2px rgba(191, 199, 241, 0.35); }
+		.menu-toggle:hover { border-color: var(--border-strong); background: var(--surface-muted); }
+		.menu-toggle:focus { outline: none; border-color: var(--accent-border); box-shadow: 0 0 0 2px var(--focus-ring); }
 		.menu-icon { display: inline-grid; gap: 3px; }
 		.menu-icon span { display: block; width: 14px; height: 2px; background: currentColor; border-radius: 999px; }
-		.menu-label { font-size: 11px; letter-spacing: 0.02em; text-transform: uppercase; color: #6b6b6b; }
+		.menu-label { font-size: 11px; letter-spacing: 0.02em; text-transform: uppercase; color: var(--text-muted); }
 		.menu-panel {
 			position: absolute;
 			top: calc(100% + 8px);
@@ -1987,9 +2039,9 @@ export default class LocalServerPlugin extends Plugin {
 			max-height: calc(100vh - 100px);
 			padding: 12px;
 			border-radius: 14px;
-			border: 1px solid #e3e3df;
-			background: #ffffff;
-			box-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
+			border: 1px solid var(--border-strong);
+			background: var(--surface);
+			box-shadow: var(--menu-shadow);
 			box-sizing: border-box;
 			overflow: auto;
 			--menu-shift-x: 0px;
@@ -2010,7 +2062,7 @@ export default class LocalServerPlugin extends Plugin {
 			font-size: 11px;
 			letter-spacing: 0.08em;
 			text-transform: uppercase;
-			color: #8a8a83;
+			color: var(--text-subtle);
 			margin-bottom: 10px;
 		}
 		.menu-controls {
@@ -2018,16 +2070,16 @@ export default class LocalServerPlugin extends Plugin {
 			gap: 10px;
 		}
 		.title { font-size: 18px; font-weight: 600; margin: 0 0 4px; font-family: var(--font-sans); }
-		.path { font-size: 12px; color: #6b6b6b; word-break: break-all; font-family: var(--font-sans); }
+		.path { font-size: 12px; color: var(--text-muted); word-break: break-all; font-family: var(--font-sans); }
 		.width-control {
 			display: inline-flex;
 			align-items: center;
 			gap: 8px;
 			padding: 6px 10px;
 			border-radius: 999px;
-			border: 1px solid #e1e1dc;
-			background: #fff;
-			color: #5b5b5b;
+			border: 1px solid var(--border);
+			background: var(--surface);
+			color: var(--text-muted);
 			font-family: var(--font-sans);
 			font-size: 12px;
 			cursor: default;
@@ -2036,24 +2088,24 @@ export default class LocalServerPlugin extends Plugin {
 			width: 68px;
 			padding: 2px 6px;
 			border-radius: 6px;
-			border: 1px solid #e1e1dc;
+			border: 1px solid var(--border);
 			font-size: 12px;
 			font-family: var(--font-sans);
-			color: #2b2b2b;
-			background: #fff;
+			color: var(--page-text);
+			background: var(--surface);
 		}
-		.width-input:focus { outline: none; border-color: #bfc7f1; box-shadow: 0 0 0 2px rgba(191, 199, 241, 0.35); }
-		.width-control .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: #8a8a83; }
-		.width-control .unit { font-size: 11px; color: #8a8a83; }
+		.width-input:focus { outline: none; border-color: var(--accent-border); box-shadow: 0 0 0 2px var(--focus-ring); }
+		.width-control .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: var(--text-subtle); }
+		.width-control .unit { font-size: 11px; color: var(--text-subtle); }
 		.width-toggle {
 			display: inline-flex;
 			align-items: center;
 			gap: 8px;
 			padding: 6px 10px;
 			border-radius: 999px;
-			border: 1px solid #e1e1dc;
-			background: #fff;
-			color: #5b5b5b;
+			border: 1px solid var(--border);
+			background: var(--surface);
+			color: var(--text-muted);
 			font-family: var(--font-sans);
 			font-size: 12px;
 			cursor: pointer;
@@ -2065,52 +2117,52 @@ export default class LocalServerPlugin extends Plugin {
 			gap: 8px;
 			padding: 6px 10px;
 			border-radius: 999px;
-			border: 1px solid #e1e1dc;
-			background: #fff;
-			color: #5b5b5b;
+			border: 1px solid var(--border);
+			background: var(--surface);
+			color: var(--text-muted);
 			font-family: var(--font-sans);
 			font-size: 12px;
 			cursor: default;
 			transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 		}
-		.width-toggle:hover { border-color: #cfcfc9; color: #2b2b2b; background: #f7f7f3; }
-		.width-toggle[aria-pressed="true"] { border-color: #bfc7f1; color: #1d2f7a; background: #eef1ff; }
-		.width-toggle .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: #8a8a83; }
+		.width-toggle:hover { border-color: var(--border-strong); color: var(--page-text); background: var(--surface-muted); }
+		.width-toggle[aria-pressed="true"] { border-color: var(--accent-border); color: var(--accent-text); background: var(--accent-bg); }
+		.width-toggle .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: var(--text-subtle); }
 		.width-toggle .value { font-weight: 600; color: inherit; }
-		.font-control:hover { border-color: #cfcfc9; color: #2b2b2b; background: #f7f7f3; }
-		.font-control .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: #8a8a83; }
-		.font-control .unit { font-size: 11px; color: #8a8a83; }
+		.font-control:hover { border-color: var(--border-strong); color: var(--page-text); background: var(--surface-muted); }
+		.font-control .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: var(--text-subtle); }
+		.font-control .unit { font-size: 11px; color: var(--text-subtle); }
 		.font-input {
 			width: 56px;
 			padding: 2px 6px;
 			border-radius: 6px;
-			border: 1px solid #e1e1dc;
+			border: 1px solid var(--border);
 			font-size: 12px;
 			font-family: var(--font-sans);
-			color: #2b2b2b;
-			background: #fff;
+			color: var(--page-text);
+			background: var(--surface);
 		}
-		.font-input:focus { outline: none; border-color: #bfc7f1; box-shadow: 0 0 0 2px rgba(191, 199, 241, 0.35); }
+		.font-input:focus { outline: none; border-color: var(--accent-border); box-shadow: 0 0 0 2px var(--focus-ring); }
 		.content {
-			background: #fff;
+			background: var(--surface);
 			padding: 28px 30px;
 			border-radius: 10px;
-			border: 1px solid #ececec;
-			box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+			border: 1px solid var(--border-strong);
+			box-shadow: var(--shadow);
 			font-size: var(--content-font-size);
 			line-height: 1.75;
 		}
 		.content h1, .content h2, .content h3 { margin-top: 1.6em; }
-		.content pre { background: #f6f6f4; color: #1f1f1f; padding: 12px 14px; border-radius: 8px; border: 1px solid #e5e5e1; overflow-x: auto; position: relative; }
+		.content pre { background: var(--code-bg); color: var(--page-text); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--code-border); overflow-x: auto; position: relative; }
 		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: var(--font-mono); }
-		.content code { font-family: var(--font-mono); background: rgba(0,0,0,0.05); padding: 0 4px; border-radius: 4px; }
-		.content blockquote { margin: 1em 0; padding-left: 12px; border-left: 3px solid #d9d9d4; color: #4f4f4f; }
+		.content code { font-family: var(--font-mono); background: var(--inline-code-bg); padding: 0 4px; border-radius: 4px; }
+		.content blockquote { margin: 1em 0; padding-left: 12px; border-left: 3px solid var(--blockquote-border); color: var(--blockquote-text); }
 		.content img { max-width: 100%; }
-		.content a { color: #1d4ed8; text-decoration: none; }
+		.content a { color: var(--link); text-decoration: none; }
 		.content a:hover { text-decoration: underline; }
 		.content table { width: 100%; border-collapse: collapse; margin: 1.2em 0; }
-		.content th, .content td { border: 1px solid #e3e3df; padding: 8px 10px; text-align: left; vertical-align: top; word-break: break-word; }
-		.content th { background: #f5f5f2; font-weight: 600; }
+		.content th, .content td { border: 1px solid var(--table-border); padding: 8px 10px; text-align: left; vertical-align: top; word-break: break-word; }
+		.content th { background: var(--table-header-bg); font-weight: 600; }
 		.table-wrap { width: 100%; overflow-x: auto; }
 		.table-wrap table { min-width: 520px; }
 		.content .copy-code-button,
@@ -2124,10 +2176,10 @@ export default class LocalServerPlugin extends Plugin {
 			right: 8px;
 			width: 28px;
 			height: 28px;
-			border: 1px solid #dcdcd6;
+			border: 1px solid var(--border);
 			border-radius: 6px;
-			background: #ffffff;
-			color: #6b6b6b;
+			background: var(--surface);
+			color: var(--text-muted);
 			display: grid;
 			place-items: center;
 			cursor: pointer;
@@ -2137,8 +2189,8 @@ export default class LocalServerPlugin extends Plugin {
 		}
 		.content pre:hover .code-copy-button,
 		.content pre:focus-within .code-copy-button { opacity: 0.9; transform: translateY(0); }
-		.content .code-copy-button:hover { opacity: 1; background: #f5f5f2; border-color: #cfcfc9; color: #2b2b2b; }
-		.content .code-copy-button.is-copied { border-color: #9ad1b3; color: #1f7a4f; background: #f0faf4; }
+		.content .code-copy-button:hover { opacity: 1; background: var(--surface-muted); border-color: var(--border-strong); color: var(--page-text); }
+		.content .code-copy-button.is-copied { border-color: var(--success-border); color: var(--success-text); background: var(--success-bg); }
 		mjx-container { font-family: var(--font-math); }
 		.math-block { overflow-x: auto; }
 		@media (max-width: 720px) {
@@ -2191,6 +2243,10 @@ export default class LocalServerPlugin extends Plugin {
 								<span class="label">FULL</span>
 								<span class="value" data-width-value>OFF</span>
 							</button>
+							<button class="width-toggle" type="button" data-action="toggle-theme" aria-pressed="false" title="テーマを切り替え">
+								<span class="label">THEME</span>
+								<span class="value" data-theme-value>LIGHT</span>
+							</button>
 							<label class="font-control" data-action="font-size" title="文字サイズ(px)">
 								<span class="label">TEXT</span>
 								<input class="font-input" type="number" min="10" max="30" step="1" value="16" aria-label="文字サイズ(px)">
@@ -2215,6 +2271,9 @@ export default class LocalServerPlugin extends Plugin {
 			const widthInput = document.querySelector('.width-input');
 			const fontStorageKey = 'local-vault-preview-font-size';
 			const fontInput = document.querySelector('.font-input');
+			const themeStorageKey = 'local-vault-preview-theme';
+			const themeToggle = document.querySelector('[data-action="toggle-theme"]');
+			const themeValue = themeToggle ? themeToggle.querySelector('[data-theme-value]') : null;
 			const menuToggle = document.querySelector('[data-action="toggle-menu"]');
 			const menuPanel = document.querySelector('.menu-panel');
 
@@ -2247,6 +2306,22 @@ export default class LocalServerPlugin extends Plugin {
 				fontInput.value = String(safeSize);
 			};
 
+			const getPreferredTheme = () => {
+				if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+					return 'dark';
+				}
+				return 'light';
+			};
+
+			const applyTheme = (mode) => {
+				const theme = mode === 'dark' ? 'dark' : 'light';
+				document.documentElement.setAttribute('data-theme', theme);
+				if (themeToggle && themeValue) {
+					themeToggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+					themeValue.textContent = theme === 'dark' ? 'DARK' : 'LIGHT';
+				}
+			};
+
 			if (pageEl && widthToggle && widthValue) {
 				const savedMode = localStorage.getItem(widthStorageKey);
 				const initialMode = savedMode === 'full' ? 'full' : 'fixed';
@@ -2264,6 +2339,20 @@ export default class LocalServerPlugin extends Plugin {
 						applyWidthSize(safeWidth);
 					}
 				});
+			}
+
+			if (themeToggle) {
+				const savedTheme = localStorage.getItem(themeStorageKey);
+				const initialTheme = (savedTheme === 'dark' || savedTheme === 'light') ? savedTheme : getPreferredTheme();
+				applyTheme(initialTheme);
+				themeToggle.addEventListener('click', () => {
+					const currentTheme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+					const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+					localStorage.setItem(themeStorageKey, nextTheme);
+					applyTheme(nextTheme);
+				});
+			} else {
+				applyTheme(getPreferredTheme());
 			}
 
 			if (menuToggle instanceof HTMLButtonElement && menuPanel instanceof HTMLElement) {
