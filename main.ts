@@ -2328,7 +2328,7 @@ export default class LocalServerPlugin extends Plugin {
 		window.MathJax = {
 			tex: {
 				inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
-				displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']]
+				displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
 				processEscapes: true,
 				processEnvironments: true
 			},
@@ -2421,6 +2421,9 @@ export default class LocalServerPlugin extends Plugin {
 			};
 			// 非同期レイアウト待ちの競合を避けるためのトークン
 			let pagebookBuildToken = 0;
+			// 画面サイズが本当に変わったときだけ再計算する
+			const getViewportSize = () => ({ width: window.innerWidth, height: window.innerHeight });
+			let lastViewportSize = getViewportSize();
 
 			const applyWidthMode = (mode) => {
 				if (!pageEl || !widthToggle || !widthValue) {
@@ -2459,6 +2462,122 @@ export default class LocalServerPlugin extends Plugin {
 			// 見出しかどうかを判定する（H1〜H6）
 			const isHeadingElement = (node) => {
 				return !!(node && node.nodeType === Node.ELEMENT_NODE && /^H[1-6]$/i.test(node.tagName));
+			};
+
+			// 段落など、内容を分割できるブロックかを判定する
+			const isSplittableElement = (node) => {
+				if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+					return false;
+				}
+				const tag = node.tagName ? node.tagName.toUpperCase() : '';
+				return tag === 'P' || tag === 'LI' || tag === 'BLOCKQUOTE';
+			};
+
+			const getContentLineHeight = () => {
+				if (!contentEl) {
+					return 0;
+				}
+				const value = getComputedStyle(contentEl).lineHeight || '';
+				const parsed = Number.parseFloat(value);
+				return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+			};
+
+			const getTextNodes = (root) => {
+				const nodes = [];
+				if (!root) {
+					return nodes;
+				}
+				const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+				let current = walker.nextNode();
+				while (current) {
+					nodes.push(current);
+					current = walker.nextNode();
+				}
+				return nodes;
+			};
+
+			const splitElementByCharOffset = (element, charOffset) => {
+				if (!element || charOffset <= 0) {
+					return null;
+				}
+				const textNodes = getTextNodes(element);
+				const totalLength = textNodes.reduce((sum, node) => sum + (node.textContent || '').length, 0);
+				if (totalLength === 0 || charOffset >= totalLength) {
+					return null;
+				}
+				let remaining = charOffset;
+				let targetNode = null;
+				let targetOffset = 0;
+				for (const node of textNodes) {
+					const length = (node.textContent || '').length;
+					if (remaining <= length) {
+						targetNode = node;
+						targetOffset = remaining;
+						break;
+					}
+					remaining -= length;
+				}
+				if (!targetNode) {
+					return null;
+				}
+
+				const fullRange = document.createRange();
+				fullRange.selectNodeContents(element);
+
+				const headRange = document.createRange();
+				headRange.setStart(fullRange.startContainer, fullRange.startOffset);
+				headRange.setEnd(targetNode, targetOffset);
+
+				const tailRange = document.createRange();
+				tailRange.setStart(targetNode, targetOffset);
+				tailRange.setEnd(fullRange.endContainer, fullRange.endOffset);
+
+				const head = element.cloneNode(false);
+				const tail = element.cloneNode(false);
+				head.appendChild(headRange.cloneContents());
+				tail.appendChild(tailRange.cloneContents());
+
+				if (!(head.textContent || '').trim() || !(tail.textContent || '').trim()) {
+					return null;
+				}
+				return { head, tail };
+			};
+
+			const splitElementToFit = (element, page, availableHeight, baseHeight, minHeadHeight) => {
+				if (!element || !page) {
+					return null;
+				}
+				const textNodes = getTextNodes(element);
+				const totalLength = textNodes.reduce((sum, node) => sum + (node.textContent || '').length, 0);
+				if (totalLength < 20) {
+					return null;
+				}
+
+				let low = 1;
+				let high = totalLength - 1;
+				let best = null;
+
+				while (low <= high) {
+					const mid = Math.floor((low + high) / 2);
+					const split = splitElementByCharOffset(element, mid);
+					if (!split) {
+						high = mid - 1;
+						continue;
+					}
+					page.appendChild(split.head);
+					const fits = page.scrollHeight <= availableHeight;
+					const headHeight = page.scrollHeight - baseHeight;
+					page.removeChild(split.head);
+
+					if (fits && headHeight >= minHeadHeight) {
+						best = split;
+						low = mid + 1;
+					} else {
+						high = mid - 1;
+					}
+				}
+
+				return best;
 			};
 
 			const updatePageMaxWidth = (singleWidth, spreadEnabled) => {
@@ -2680,10 +2799,9 @@ export default class LocalServerPlugin extends Plugin {
 					contentEl.innerHTML = '';
 					contentEl.appendChild(pagebook);
 
-					const headerVisible = document.body.classList.contains('header-reveal');
-					const headerRect = headerVisible && headerEl ? headerEl.getBoundingClientRect() : null;
-					const topOffset = headerRect ? headerRect.bottom : 0;
-					const availableHeight = Math.max(360, window.innerHeight - topOffset - 6);
+					// 固定ヘッダーの高さを引かず、改ページの過剰発生を抑える。
+					const reservedViewportPadding = 6;
+					const availableHeight = Math.max(360, window.innerHeight - reservedViewportPadding);
 					const desiredSingleWidth = widthInput instanceof HTMLInputElement
 						? Math.min(2000, Math.max(480, Number.parseInt(widthInput.value || '', 10) || 900))
 						: 900;
@@ -2706,6 +2824,10 @@ export default class LocalServerPlugin extends Plugin {
 						return page;
 					};
 
+					// 1行分を目安に、段落の分割許容ラインを決める。
+					const lineHeight = getContentLineHeight();
+					const minSplitHeight = Math.max(24, lineHeight > 0 ? lineHeight * 1.2 : 24);
+
 					let currentPage = createPage();
 					track.appendChild(currentPage);
 
@@ -2719,9 +2841,57 @@ export default class LocalServerPlugin extends Plugin {
 						const nextNode = i + 1 < nodes.length ? nodes[i + 1] : null;
 
 						if (isHeading && nextNode) {
+							const hadContentBefore = currentPage.childNodes.length > 0;
+							const minContinuationHeight = minSplitHeight;
+
 							// 見出しがページ末に孤立しないよう、次の要素と一緒に収まるかを見る。
 							currentPage.appendChild(node);
 							if (currentPage.scrollHeight > availableHeight) {
+								currentPage.removeChild(node);
+								if (!hadContentBefore) {
+									currentPage.appendChild(node);
+									currentPage.classList.add('is-overflow');
+								} else {
+									currentPage = createPage();
+									track.appendChild(currentPage);
+									currentPage.appendChild(node);
+									if (currentPage.scrollHeight > availableHeight) {
+										currentPage.classList.add('is-overflow');
+									}
+								}
+								continue;
+							}
+
+							const remainingAfterHeading = availableHeight - currentPage.scrollHeight;
+
+							currentPage.appendChild(nextNode);
+							const fitsWithNext = currentPage.scrollHeight <= availableHeight;
+							currentPage.removeChild(nextNode);
+
+							if (!fitsWithNext) {
+								if (remainingAfterHeading >= minContinuationHeight && isSplittableElement(nextNode)) {
+									const split = splitElementToFit(nextNode, currentPage, availableHeight, currentPage.scrollHeight, minContinuationHeight);
+									if (split) {
+										currentPage.appendChild(split.head);
+										currentPage = createPage();
+										track.appendChild(currentPage);
+										currentPage.appendChild(split.tail);
+										if (currentPage.scrollHeight > availableHeight) {
+											currentPage.classList.add('is-overflow');
+										}
+										i += 1;
+										continue;
+									}
+								}
+
+								if (!hadContentBefore || remainingAfterHeading >= minContinuationHeight) {
+									// 見出し直下に最低限の本文を残すため、次の要素を同じページでオーバーフロー許可にする。
+									currentPage.appendChild(nextNode);
+									currentPage.classList.add('is-overflow');
+									i += 1;
+									continue;
+								}
+
 								currentPage.removeChild(node);
 								currentPage = createPage();
 								track.appendChild(currentPage);
@@ -2732,25 +2902,28 @@ export default class LocalServerPlugin extends Plugin {
 								continue;
 							}
 
-							currentPage.appendChild(nextNode);
-							const fitsWithNext = currentPage.scrollHeight <= availableHeight;
-							currentPage.removeChild(nextNode);
-
-							if (!fitsWithNext && currentPage.childNodes.length > 0) {
-								currentPage.removeChild(node);
-								currentPage = createPage();
-								track.appendChild(currentPage);
-								currentPage.appendChild(node);
-								if (currentPage.scrollHeight > availableHeight) {
-									currentPage.classList.add('is-overflow');
-								}
-							}
 							continue;
 						}
 
+						const baseHeight = currentPage.scrollHeight;
+						const remainingHeight = availableHeight - baseHeight;
 						currentPage.appendChild(node);
 						if (currentPage.scrollHeight > availableHeight) {
 							currentPage.removeChild(node);
+
+							if (remainingHeight >= minSplitHeight && isSplittableElement(node)) {
+								const split = splitElementToFit(node, currentPage, availableHeight, baseHeight, minSplitHeight);
+								if (split) {
+									currentPage.appendChild(split.head);
+									currentPage = createPage();
+									track.appendChild(currentPage);
+									currentPage.appendChild(split.tail);
+									if (currentPage.scrollHeight > availableHeight) {
+										currentPage.classList.add('is-overflow');
+									}
+									continue;
+								}
+							}
 
 							// 見出しだけのページになりそうなら、同じページに残してスクロールを許可する。
 							const headingOnly = currentPage.childNodes.length === 1
@@ -2957,14 +3130,12 @@ export default class LocalServerPlugin extends Plugin {
 						return;
 					}
 					document.body.classList.add('header-reveal');
-					refreshPagebook();
 				};
 				const hideHeader = () => {
 					if (!pagebookState.enabled) {
 						return;
 					}
 					document.body.classList.remove('header-reveal');
-					refreshPagebook();
 				};
 
 				headerHoverZone.addEventListener('mouseenter', () => {
@@ -3082,6 +3253,11 @@ export default class LocalServerPlugin extends Plugin {
 			});
 
 			window.addEventListener('resize', () => {
+				const next = getViewportSize();
+				if (next.width === lastViewportSize.width && next.height === lastViewportSize.height) {
+					return;
+				}
+				lastViewportSize = next;
 				refreshPagebook();
 			});
 		})();
