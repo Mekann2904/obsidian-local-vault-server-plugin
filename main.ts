@@ -485,7 +485,7 @@ export default class LocalServerPlugin extends Plugin {
 
 	private prepareMarkdownForPreview(markdown: string, sourcePath: string): {
 		markdown: string;
-		mathPlaceholders: Map<string, string>;
+		mathPlaceholders: Map<string, { mode: 'inline' | 'block'; content: string }>;
 	} {
 		const withEmbeds = this.replaceObsidianImageEmbeds(markdown, sourcePath);
 		const normalizedImages = this.normalizeMarkdownImageLinks(withEmbeds);
@@ -534,33 +534,33 @@ export default class LocalServerPlugin extends Plugin {
 
 	private extractMathPlaceholders(markdown: string): {
 		markdown: string;
-		mathPlaceholders: Map<string, string>;
+		mathPlaceholders: Map<string, { mode: 'inline' | 'block'; content: string }>;
 	} {
-		const mathPlaceholders = new Map<string, string>();
+		const mathPlaceholders = new Map<string, { mode: 'inline' | 'block'; content: string }>();
 		let counter = 0;
 
-		const replaceWithPlaceholder = (content: string): string => {
+		const replaceWithPlaceholder = (content: string, mode: 'inline' | 'block'): string => {
 			const key = `@@MATH_${counter++}@@`;
-			mathPlaceholders.set(key, content);
+			mathPlaceholders.set(key, { mode, content });
 			return key;
 		};
 
 		const replaceMath = (input: string): string => {
 			let output = input;
 			const blockPatterns: Array<{ regex: RegExp; wrap: (value: string) => string }> = [
-				{ regex: /\$\$([\s\S]+?)\$\$/g, wrap: (value) => `$$${value}$$` },
-				{ regex: /\\\\\[((?:.|\n)+?)\\\\\]/g, wrap: (value) => `\\[${value}\\]` },
+				{ regex: /\$\$([\s\S]+?)\$\$/g, wrap: (value) => value },
+				{ regex: /\\\\\[((?:.|\n)+?)\\\\\]/g, wrap: (value) => value },
 			];
 			const inlinePatterns: Array<{ regex: RegExp; wrap: (value: string) => string }> = [
-				{ regex: /\\\\\((.+?)\\\\\)/g, wrap: (value) => `\\(${value}\\)` },
-				{ regex: /\$(?!\$)([^$\n]+?)\$(?!\$)/g, wrap: (value) => `$${value}$` },
+				{ regex: /\\\\\((.+?)\\\\\)/g, wrap: (value) => value },
+				{ regex: /\$(?!\$)([^$\n]+?)\$(?!\$)/g, wrap: (value) => value },
 			];
 
 			for (const pattern of blockPatterns) {
-				output = output.replace(pattern.regex, (_match, value: string) => replaceWithPlaceholder(pattern.wrap(value)));
+				output = output.replace(pattern.regex, (_match, value: string) => replaceWithPlaceholder(pattern.wrap(value), 'block'));
 			}
 			for (const pattern of inlinePatterns) {
-				output = output.replace(pattern.regex, (_match, value: string) => replaceWithPlaceholder(pattern.wrap(value)));
+				output = output.replace(pattern.regex, (_match, value: string) => replaceWithPlaceholder(pattern.wrap(value), 'inline'));
 			}
 			return output;
 		};
@@ -579,13 +579,23 @@ export default class LocalServerPlugin extends Plugin {
 		return { markdown: processed, mathPlaceholders };
 	}
 
-	private restoreMathPlaceholders(container: HTMLElement, placeholders: Map<string, string>): void {
+	private restoreMathPlaceholders(container: HTMLElement, placeholders: Map<string, { mode: 'inline' | 'block'; content: string }>): void {
 		if (placeholders.size === 0) {
 			return;
 		}
+		const escapeMathHtml = (value: string): string =>
+			value
+				.replace(/&/g, '&amp;')
+				.replace(/</g, '&lt;')
+				.replace(/>/g, '&gt;');
+
 		let html = container.innerHTML;
 		for (const [key, value] of placeholders) {
-			html = html.split(key).join(value);
+			const escaped = escapeMathHtml(value.content);
+			const wrapped = value.mode === 'block'
+				? `\\[${escaped}\\]`
+				: `\\(${escaped}\\)`;
+			html = html.split(key).join(wrapped);
 		}
 		container.innerHTML = html;
 	}
@@ -1897,7 +1907,7 @@ export default class LocalServerPlugin extends Plugin {
 		sourcePath: string,
 		entry: ServerEntrySettings,
 		token: string,
-		mathPlaceholders: Map<string, string>
+		mathPlaceholders: Map<string, { mode: 'inline' | 'block'; content: string }>
 	): Promise<string> {
 		const container = document.createElement('div');
 		const tempComponent = new Component();
@@ -1919,7 +1929,7 @@ export default class LocalServerPlugin extends Plugin {
 		const title = escapeHtml(path.basename(sourcePath));
 
 		return `<!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1982,7 +1992,10 @@ export default class LocalServerPlugin extends Plugin {
 			tex: {
 				inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
 				displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']]
+				processEscapes: true,
+				processEnvironments: true
 			},
+			startup: { typeset: false },
 			svg: { fontCache: 'global' }
 		};
 	</script>
@@ -2043,6 +2056,15 @@ export default class LocalServerPlugin extends Plugin {
 
 				pre.appendChild(copyButton);
 			});
+
+			function waitForMathJax() {
+				if (!window.MathJax || !window.MathJax.typesetPromise) {
+					setTimeout(waitForMathJax, 50);
+					return;
+				}
+				window.MathJax.typesetPromise();
+			}
+			waitForMathJax();
 		})();
 	</script>
 </body>
