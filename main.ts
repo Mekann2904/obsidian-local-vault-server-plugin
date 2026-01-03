@@ -2,7 +2,7 @@
 // Role: Obsidian 内でローカルファイル配信サーバーを管理するプラグイン本体
 // Why: Vault 内のファイルを安全に配信し、設定 UI とログ表示を提供するため
 // Related: manifest.json, README.md, styles.css, main.js
-import { App, Plugin, PluginSettingTab, Setting, Modal, Notice, DataAdapter, FileSystemAdapter, TextComponent, TFile } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Modal, Notice, DataAdapter, FileSystemAdapter, TextComponent, TFile, MarkdownRenderer, Component } from 'obsidian';
 import * as http from 'http';
 import * as https from 'https';
 import * as crypto from 'crypto';
@@ -26,6 +26,9 @@ const DEFAULT_INDEX_EXTENSIONS = new Set([
 	'tif',
 	'tiff',
 ]);
+const MARKDOWN_PREVIEW_QUERY_KEY = 'preview';
+const MARKDOWN_PREVIEW_ENDPOINT = '/__markdown-preview';
+const MARKDOWN_PREVIEW_TOKEN_TTL_MS = 2 * 60 * 1000;
 
 /**
  * 個々のサーバー設定用インターフェース
@@ -140,6 +143,8 @@ export default class LocalServerPlugin extends Plugin {
 	private indexCache: Map<string, IndexCacheEntry> = new Map();
 	/** Vault の実パスをキャッシュして同期 I/O を減らす */
 	private vaultBasePathCache: string | null = null;
+	/** 一時プレビュー用のトークン保管 */
+	private previewTokens: Map<string, { filePath: string; expiresAt: number }> = new Map();
 
 	// *** Error 2 & 5: Property 'statusBarItemEl' / 'logMessages' does not exist on type 'LocalServerPlugin'. ***
     // These properties ARE defined below. If the error persists, it's likely an environment issue.
@@ -202,6 +207,20 @@ export default class LocalServerPlugin extends Plugin {
 
 
 		this.addSettingTab(new LocalServerSettingTab(this.app, this));
+		this.addCommand({
+			id: 'open-markdown-in-external-browser',
+			name: '外部ブラウザで Markdown を開く（簡易HTML）',
+			checkCallback: (checking: boolean) => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile || !this.isMarkdownFile(activeFile.path)) {
+					return false;
+				}
+				if (!checking) {
+					void this.openMarkdownInExternalBrowser(activeFile);
+				}
+				return true;
+			},
+		});
 
 		this.statusBarItemEl = this.addStatusBarItem();
 		this.statusBarItemEl.addClass('mod-clickable');
@@ -272,6 +291,102 @@ export default class LocalServerPlugin extends Plugin {
 		const protocol = entry.enableHttps ? 'https' : 'http';
 		const host = entry.host === '0.0.0.0' ? '127.0.0.1' : entry.host;
 		return `${protocol}://${host}:${entry.port}`;
+	}
+
+	private isMarkdownFile(filePath: string): boolean {
+		const ext = path.extname(filePath).toLowerCase();
+		return ext === '.md' || ext === '.markdown' || ext === '.mdown';
+	}
+
+	private findRunningServerForPreview(): RunningServerInfo | null {
+		const candidates = Array.from(this.runningServers.values())
+			.filter((info) => info.status === 'running' && info.server);
+		if (candidates.length === 0) {
+			return null;
+		}
+		const preferred = candidates.find((info) => info.entry.host === '127.0.0.1' || info.entry.host === 'localhost');
+		return preferred ?? candidates[0];
+	}
+
+	private prunePreviewTokens(): void {
+		const now = Date.now();
+		for (const [token, info] of this.previewTokens) {
+			if (info.expiresAt <= now) {
+				this.previewTokens.delete(token);
+			}
+		}
+	}
+
+	private issuePreviewToken(filePath: string): string {
+		this.prunePreviewTokens();
+		const token = crypto.randomBytes(16).toString('hex');
+		this.previewTokens.set(token, { filePath, expiresAt: Date.now() + MARKDOWN_PREVIEW_TOKEN_TTL_MS });
+		return token;
+	}
+
+	private resolvePreviewToken(token: string | null): string | null {
+		if (!token) {
+			return null;
+		}
+		this.prunePreviewTokens();
+		const info = this.previewTokens.get(token);
+		if (!info) {
+			return null;
+		}
+		return info.filePath;
+	}
+
+	private buildMarkdownPreviewUrl(entry: ServerEntrySettings, token: string): string {
+		const baseUrl = this.buildBaseUrl(entry);
+		const cacheBust = Date.now().toString();
+		return `${baseUrl}${MARKDOWN_PREVIEW_ENDPOINT}?token=${token}&ts=${cacheBust}`;
+	}
+
+	private openExternalUrl(url: string): void {
+		try {
+			const electron = (window as any)?.require?.('electron');
+			if (electron?.shell?.openExternal) {
+				electron.shell.openExternal(url);
+				return;
+			}
+		} catch {
+			// Fallback to window.open when Electron shell is unavailable.
+		}
+		window.open(url);
+	}
+
+	private async openMarkdownInExternalBrowser(file: TFile): Promise<void> {
+		const vaultBasePath = this.getVaultBasePath();
+		if (!vaultBasePath) {
+			new Notice('Vault の実パスを取得できません。');
+			return;
+		}
+
+		const absolutePath = path.join(vaultBasePath, file.path);
+		let resolvedPath: string;
+		try {
+			resolvedPath = fs.realpathSync(absolutePath);
+		} catch (error: any) {
+			this.log('error', `Failed to resolve file path for preview: ${error?.message ?? error}`);
+			new Notice('ファイルの実パスを取得できませんでした。');
+			return;
+		}
+
+		if (!this.isPathInside(vaultBasePath, resolvedPath)) {
+			new Notice('Vault 外のファイルは開けません。');
+			return;
+		}
+
+		const serverInfo = this.findRunningServerForPreview();
+		if (!serverInfo) {
+			new Notice('起動中のサーバーがありません。');
+			return;
+		}
+
+		const token = this.issuePreviewToken(resolvedPath);
+		const previewUrl = this.buildMarkdownPreviewUrl(serverInfo.entry, token);
+		this.log('info', `Opening markdown preview: ${previewUrl}`, serverInfo.entry.name);
+		this.openExternalUrl(previewUrl);
 	}
 
 	log(type: 'info' | 'warn' | 'error', message: string, entryName?: string, ...optionalParams: any[]) {
@@ -547,7 +662,7 @@ export default class LocalServerPlugin extends Plugin {
                       return;
                  }
 
-                 this.handleRequest(req, res, serverInfo.entry, serverInfo.servedRealPath);
+                 void this.handleRequest(req, res, serverInfo.entry, serverInfo.servedRealPath);
             };
 
 			try {
@@ -698,7 +813,7 @@ export default class LocalServerPlugin extends Plugin {
 	}
 
 
-	private handleRequest(req: http.IncomingMessage, res: http.ServerResponse, entry: ServerEntrySettings, servedRealPath: string) {
+	private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse, entry: ServerEntrySettings, servedRealPath: string) {
 		const startTime = Date.now();
 		let statusCode = 200;
 
@@ -726,6 +841,53 @@ export default class LocalServerPlugin extends Plugin {
 			const protocol = entry.enableHttps ? 'https' : 'http';
 			const baseUrl = `${protocol}://${hostHeader}`;
 
+			let pathname: string;
+			let searchParams: URLSearchParams;
+			try {
+				const parsedUrl = new URL(req.url, baseUrl);
+				pathname = decodeURIComponent(parsedUrl.pathname);
+				searchParams = parsedUrl.searchParams;
+			} catch (e) {
+				statusCode = 400;
+				this.sendResponse(res, statusCode, 'Bad Request: Invalid URL encoding.', startTime, entry.name, req.method, req.url);
+				return;
+			}
+
+			if (pathname === MARKDOWN_PREVIEW_ENDPOINT) {
+				const previewToken = searchParams?.get('token') ?? '';
+				const previewPath = this.resolvePreviewToken(previewToken);
+				if (!previewPath) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden: Invalid or expired preview token.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				const vaultBasePath = this.getVaultBasePath();
+				if (!vaultBasePath || !this.isPathInside(vaultBasePath, previewPath)) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden: File is outside vault.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				try {
+					const stats = await fs.promises.stat(previewPath);
+					if (!stats.isFile()) {
+						statusCode = 404;
+						this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url);
+						return;
+					}
+				} catch {
+					statusCode = 404;
+					this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				if (!this.isMarkdownFile(previewPath)) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden: Not a markdown file.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				void this.serveMarkdownPreview(res, previewPath, entry.name, startTime, req.method, req.url);
+				return;
+			}
+
 			if (entry.authToken) {
 				const authHeader = req.headers['authorization'];
 				if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -740,16 +902,6 @@ export default class LocalServerPlugin extends Plugin {
                     this.sendResponse(res, statusCode, 'Forbidden: Invalid authentication token.', startTime, entry.name, req.method, req.url);
                     return;
                 }
-			}
-
-			let pathname: string;
-			try {
-				const parsedUrl = new URL(req.url, baseUrl);
-				pathname = decodeURIComponent(parsedUrl.pathname);
-			} catch (e) {
-				statusCode = 400;
-				this.sendResponse(res, statusCode, 'Bad Request: Invalid URL encoding.', startTime, entry.name, req.method, req.url);
-				return;
 			}
 
             if (!servedRealPath) {
@@ -770,7 +922,7 @@ export default class LocalServerPlugin extends Plugin {
 					res,
 					entry,
 					servedRealPath,
-					new URL(req.url, baseUrl).searchParams,
+					searchParams,
 					startTime,
 					req.method,
 					req.url,
@@ -833,6 +985,12 @@ export default class LocalServerPlugin extends Plugin {
                         }
                         this.serveDirectoryListing(res, resolvedPath, cleanPathname, entry.name, startTime, entry.enableWhitelist, entry.whitelistFiles, servedRealPath, req.method, req.url);
 					} else if (stats.isFile()) {
+						// preview=1 のときだけ Markdown を簡易HTMLで返す。
+						const previewRequested = searchParams?.get(MARKDOWN_PREVIEW_QUERY_KEY) === '1';
+						if (previewRequested && this.isMarkdownFile(resolvedPath)) {
+							void this.serveMarkdownPreview(res, resolvedPath, entry.name, startTime, req.method, req.url);
+							return;
+						}
 						if (enforceVaultFiles && vaultBasePath && !this.isVaultFileResolvedPath(vaultBasePath, resolvedPath)) {
 							statusCode = 404;
 							this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url, cleanPathname);
@@ -1392,6 +1550,89 @@ export default class LocalServerPlugin extends Plugin {
 	private buildFileEtag(stats: fs.Stats): string {
 		// ファイル更新の検出に十分な軽量 ETag
 		return `W/"${stats.size}-${stats.mtimeMs}"`;
+	}
+
+	private async serveMarkdownPreview(
+		res: http.ServerResponse,
+		filePath: string,
+		entryName: string,
+		startTime: number,
+		method?: string,
+		url?: string
+	): Promise<void> {
+		try {
+			const markdown = await fs.promises.readFile(filePath, 'utf8');
+			const html = await this.buildMarkdownPreviewHtml(markdown, filePath);
+			const requestMethod = (method ?? 'GET').toUpperCase();
+
+			res.setHeader('Content-Type', 'text/html; charset=utf-8');
+			res.setHeader('Cache-Control', 'no-store');
+			res.statusCode = 200;
+
+			if (requestMethod !== 'HEAD') {
+				res.end(html);
+			} else {
+				res.end();
+			}
+			this.logRequest(startTime, 200, entryName, method, url, filePath);
+		} catch (error: any) {
+			this.log('error', `Markdown preview error for "${filePath}": ${error?.message ?? error}`, entryName);
+			this.sendResponse(res, 500, 'Internal Server Error', startTime, entryName, method, url, filePath);
+		}
+	}
+
+	private async buildMarkdownPreviewHtml(markdown: string, sourcePath: string): Promise<string> {
+		const container = document.createElement('div');
+		const tempComponent = new Component();
+		await MarkdownRenderer.render(this.app, markdown, container, sourcePath, tempComponent);
+		const renderedHtml = container.innerHTML;
+		// 一時コンポーネントを破棄してプレビュー用の子コンポーネントを回収する。
+		tempComponent.unload();
+
+		const escapeHtml = (value: string): string =>
+			value
+				.replace(/&/g, '&amp;')
+				.replace(/</g, '&lt;')
+				.replace(/>/g, '&gt;')
+				.replace(/"/g, '&quot;')
+				.replace(/'/g, '&#39;');
+
+		const title = escapeHtml(path.basename(sourcePath));
+
+		return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>${title}</title>
+	<style>
+		body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; color: #222; }
+		.page { max-width: 860px; margin: 0 auto; padding: 32px 20px 48px; }
+		.header { margin-bottom: 24px; }
+		.title { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+		.path { font-size: 12px; color: #666; word-break: break-all; }
+		.content { background: #fff; padding: 28px 32px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
+		.content h1, .content h2, .content h3 { margin-top: 1.6em; }
+		.content pre { background: #f0f0f0; padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+		.content code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+		.content blockquote { margin: 1em 0; padding-left: 12px; border-left: 3px solid #ddd; color: #555; }
+		.content img { max-width: 100%; }
+		.content a { color: #1b6ef3; text-decoration: none; }
+		.content a:hover { text-decoration: underline; }
+	</style>
+</head>
+<body>
+	<div class="page">
+		<header class="header">
+			<p class="title">${title}</p>
+			<p class="path">${escapeHtml(sourcePath)}</p>
+		</header>
+		<main class="content">
+			${renderedHtml}
+		</main>
+	</div>
+</body>
+</html>`;
 	}
 
 		async loadSettings() {
