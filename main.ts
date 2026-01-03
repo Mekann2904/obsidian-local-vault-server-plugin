@@ -210,7 +210,7 @@ export default class LocalServerPlugin extends Plugin {
 		this.addSettingTab(new LocalServerSettingTab(this.app, this));
 		this.addCommand({
 			id: 'open-markdown-in-external-browser',
-			name: '外部ブラウザで Markdown を開く（簡易HTML）',
+			name: '外部ブラウザで Markdown を開く（HTML）',
 			checkCallback: (checking: boolean) => {
 				const activeFile = this.app.workspace.getActiveFile();
 				if (!activeFile || !this.isMarkdownFile(activeFile.path)) {
@@ -1940,13 +1940,100 @@ export default class LocalServerPlugin extends Plugin {
 			--font-sans: "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans", "Helvetica Neue", "Segoe UI", sans-serif;
 			--font-mono: "Ricty Diminished", "Ricty", "Menlo", "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
 			--font-math: "XITS Math", "STIX Two Math", "Cambria Math", "Latin Modern Math", serif;
+			--page-max-width: 900px;
+			--page-padding-x: 20px;
+			--content-font-size: 16px;
 		}
 		body { margin: 0; font-family: var(--font-serif); background: #fbfbf9; color: #1f1f1f; }
-		.page { max-width: 860px; margin: 0 auto; padding: 36px 20px 64px; }
+		.page { max-width: var(--page-max-width); margin: 0 auto; padding: 36px var(--page-padding-x) 64px; transition: max-width 0.2s ease; }
+		.page.is-full { max-width: 100%; }
 		.header { margin-bottom: 20px; }
+		.header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+		.header-title { min-width: 0; }
+		.header-actions { display: flex; align-items: center; gap: 8px; }
 		.title { font-size: 18px; font-weight: 600; margin: 0 0 4px; font-family: var(--font-sans); }
 		.path { font-size: 12px; color: #6b6b6b; word-break: break-all; font-family: var(--font-sans); }
-		.content { background: #fff; padding: 28px 30px; border-radius: 10px; border: 1px solid #ececec; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+		.width-control {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 10px;
+			border-radius: 999px;
+			border: 1px solid #e1e1dc;
+			background: #fff;
+			color: #5b5b5b;
+			font-family: var(--font-sans);
+			font-size: 12px;
+			cursor: default;
+		}
+		.width-input {
+			width: 68px;
+			padding: 2px 6px;
+			border-radius: 6px;
+			border: 1px solid #e1e1dc;
+			font-size: 12px;
+			font-family: var(--font-sans);
+			color: #2b2b2b;
+			background: #fff;
+		}
+		.width-input:focus { outline: none; border-color: #bfc7f1; box-shadow: 0 0 0 2px rgba(191, 199, 241, 0.35); }
+		.width-control .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: #8a8a83; }
+		.width-control .unit { font-size: 11px; color: #8a8a83; }
+		.width-toggle {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 10px;
+			border-radius: 999px;
+			border: 1px solid #e1e1dc;
+			background: #fff;
+			color: #5b5b5b;
+			font-family: var(--font-sans);
+			font-size: 12px;
+			cursor: pointer;
+			transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+		}
+		.font-control {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 10px;
+			border-radius: 999px;
+			border: 1px solid #e1e1dc;
+			background: #fff;
+			color: #5b5b5b;
+			font-family: var(--font-sans);
+			font-size: 12px;
+			cursor: pointer;
+			transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+		}
+		.width-toggle:hover { border-color: #cfcfc9; color: #2b2b2b; background: #f7f7f3; }
+		.width-toggle[aria-pressed="true"] { border-color: #bfc7f1; color: #1d2f7a; background: #eef1ff; }
+		.width-toggle .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: #8a8a83; }
+		.width-toggle .value { font-weight: 600; color: inherit; }
+		.font-control:hover { border-color: #cfcfc9; color: #2b2b2b; background: #f7f7f3; }
+		.font-control .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: #8a8a83; }
+		.font-control .unit { font-size: 11px; color: #8a8a83; }
+		.font-input {
+			width: 56px;
+			padding: 2px 6px;
+			border-radius: 6px;
+			border: 1px solid #e1e1dc;
+			font-size: 12px;
+			font-family: var(--font-sans);
+			color: #2b2b2b;
+			background: #fff;
+		}
+		.font-input:focus { outline: none; border-color: #bfc7f1; box-shadow: 0 0 0 2px rgba(191, 199, 241, 0.35); }
+		.content {
+			background: #fff;
+			padding: 28px 30px;
+			border-radius: 10px;
+			border: 1px solid #ececec;
+			box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+			font-size: var(--content-font-size);
+			line-height: 1.75;
+		}
 		.content h1, .content h2, .content h3 { margin-top: 1.6em; }
 		.content pre { background: #f6f6f4; color: #1f1f1f; padding: 12px 14px; border-radius: 8px; border: 1px solid #e5e5e1; overflow-x: auto; position: relative; }
 		.content pre code { display: block; font-size: 12.5px; line-height: 1.55; font-family: var(--font-mono); }
@@ -1986,6 +2073,10 @@ export default class LocalServerPlugin extends Plugin {
 		.content .code-copy-button.is-copied { border-color: #9ad1b3; color: #1f7a4f; background: #f0faf4; }
 		mjx-container { font-family: var(--font-math); }
 		.math-block { overflow-x: auto; }
+		@media (max-width: 720px) {
+			.page { padding: 28px 16px 48px; }
+			.header-row { align-items: flex-start; }
+		}
 	</style>
 	<script>
 		window.MathJax = {
@@ -2004,8 +2095,28 @@ export default class LocalServerPlugin extends Plugin {
 <body>
 	<div class="page">
 		<header class="header">
-			<p class="title">${title}</p>
-			<p class="path">${escapeHtml(sourcePath)}</p>
+			<div class="header-row">
+				<div class="header-title">
+					<p class="title">${title}</p>
+					<p class="path">${escapeHtml(sourcePath)}</p>
+				</div>
+				<div class="header-actions">
+					<label class="width-control" data-action="width-size" title="横幅(px)">
+						<span class="label">WIDTH</span>
+						<input class="width-input" type="number" min="480" max="2000" step="10" value="900" aria-label="横幅(px)">
+						<span class="unit">px</span>
+					</label>
+					<button class="width-toggle" type="button" data-action="toggle-width" aria-pressed="false" title="フル幅に切り替え">
+						<span class="label">FULL</span>
+						<span class="value" data-width-value>OFF</span>
+					</button>
+					<label class="font-control" data-action="font-size" title="文字サイズ(px)">
+						<span class="label">TEXT</span>
+						<input class="font-input" type="number" min="10" max="30" step="1" value="16" aria-label="文字サイズ(px)">
+						<span class="unit">px</span>
+					</label>
+				</div>
+			</div>
 		</header>
 		<main class="content">
 			${renderedHtml}
@@ -2013,6 +2124,107 @@ export default class LocalServerPlugin extends Plugin {
 	</div>
 	<script>
 		(function() {
+			const widthStorageKey = 'local-vault-preview-width';
+			const pageEl = document.querySelector('.page');
+			const widthToggle = document.querySelector('[data-action="toggle-width"]');
+			const widthValue = widthToggle ? widthToggle.querySelector('[data-width-value]') : null;
+			const widthSizeStorageKey = 'local-vault-preview-width-size';
+			const widthInput = document.querySelector('.width-input');
+			const fontStorageKey = 'local-vault-preview-font-size';
+			const fontInput = document.querySelector('.font-input');
+
+			const applyWidthMode = (mode) => {
+				if (!pageEl || !widthToggle || !widthValue) {
+					return;
+				}
+				const isFull = mode === 'full';
+				pageEl.classList.toggle('is-full', isFull);
+				widthToggle.setAttribute('aria-pressed', isFull ? 'true' : 'false');
+				widthValue.textContent = isFull ? 'ON' : 'OFF';
+			};
+
+			const applyWidthSize = (size) => {
+				if (!widthInput) {
+					return;
+				}
+				const safeSize = Math.min(2000, Math.max(480, size));
+				document.documentElement.style.setProperty('--page-max-width', safeSize + 'px');
+				widthInput.value = String(safeSize);
+			};
+
+			const applyFontSize = (size) => {
+				if (!fontInput) {
+					return;
+				}
+				// 入力値の暴走を防ぐため、最小/最大を丸める。
+				const safeSize = Math.min(30, Math.max(10, size));
+				document.documentElement.style.setProperty('--content-font-size', safeSize + 'px');
+				fontInput.value = String(safeSize);
+			};
+
+			if (pageEl && widthToggle && widthValue) {
+				const savedMode = localStorage.getItem(widthStorageKey);
+				const initialMode = savedMode === 'full' ? 'full' : 'fixed';
+				applyWidthMode(initialMode);
+
+				widthToggle.addEventListener('click', () => {
+					const nextMode = pageEl.classList.contains('is-full') ? 'fixed' : 'full';
+					localStorage.setItem(widthStorageKey, nextMode);
+					applyWidthMode(nextMode);
+					if (nextMode === 'fixed') {
+						const rawWidth = widthInput instanceof HTMLInputElement
+							? Number.parseInt(widthInput.value || '', 10)
+							: 900;
+						const safeWidth = Number.isFinite(rawWidth) ? rawWidth : 900;
+						applyWidthSize(safeWidth);
+					}
+				});
+			}
+
+			if (widthInput instanceof HTMLInputElement) {
+				const savedWidthSize = Number.parseInt(localStorage.getItem(widthSizeStorageKey) || '', 10);
+				const initialWidthSize = Number.isFinite(savedWidthSize) ? savedWidthSize : 900;
+				applyWidthSize(initialWidthSize);
+
+				widthInput.addEventListener('input', () => {
+					const rawValue = Number.parseInt(widthInput.value || '', 10);
+					if (!Number.isFinite(rawValue)) {
+						return;
+					}
+					localStorage.setItem(widthSizeStorageKey, String(rawValue));
+					applyWidthSize(rawValue);
+				});
+
+				widthInput.addEventListener('blur', () => {
+					const rawValue = Number.parseInt(widthInput.value || '', 10);
+					const normalizedValue = Number.isFinite(rawValue) ? rawValue : 900;
+					localStorage.setItem(widthSizeStorageKey, String(normalizedValue));
+					applyWidthSize(normalizedValue);
+				});
+			}
+
+			if (fontInput instanceof HTMLInputElement) {
+				const savedFontSize = Number.parseInt(localStorage.getItem(fontStorageKey) || '', 10);
+				const initialFontSize = Number.isFinite(savedFontSize) ? savedFontSize : 16;
+				applyFontSize(initialFontSize);
+
+				fontInput.addEventListener('input', () => {
+					const rawValue = Number.parseInt(fontInput.value || '', 10);
+					if (!Number.isFinite(rawValue)) {
+						return;
+					}
+					localStorage.setItem(fontStorageKey, String(rawValue));
+					applyFontSize(rawValue);
+				});
+
+				fontInput.addEventListener('blur', () => {
+					const rawValue = Number.parseInt(fontInput.value || '', 10);
+					const normalizedValue = Number.isFinite(rawValue) ? rawValue : 16;
+					localStorage.setItem(fontStorageKey, String(normalizedValue));
+					applyFontSize(normalizedValue);
+				});
+			}
+
 			const removeSelectors = ['.copy-code-button', '.code-block-flair', '.codeblock-copy', '.code-block-flair'];
 			removeSelectors.forEach((selector) => {
 				document.querySelectorAll(selector).forEach((el) => el.remove());
