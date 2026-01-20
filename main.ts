@@ -315,6 +315,11 @@ export default class LocalServerPlugin extends Plugin {
 		].includes(ext);
 	}
 
+	private isPdfFile(filePath: string): boolean {
+		const ext = path.extname(filePath).toLowerCase();
+		return ext === '.pdf';
+	}
+
 	private findRunningServerForPreview(): RunningServerInfo | null {
 		const candidates = Array.from(this.runningServers.values())
 			.filter((info) => info.status === 'running' && info.server);
@@ -521,13 +526,17 @@ export default class LocalServerPlugin extends Plugin {
 			if (!this.isPathInside(vaultBasePath, resolvedPath)) {
 				continue;
 			}
-			if (!this.isMarkdownFile(resolvedPath)) {
-				continue;
+			if (this.isMarkdownFile(resolvedPath)) {
+				const newToken = this.issuePreviewToken(resolvedPath);
+				const newUrl = this.buildMarkdownPreviewUrl(entry, newToken) + hashPart;
+				link.setAttribute('href', newUrl);
+				link.setAttribute('target', '_blank');
+			} else if (this.isPdfFile(resolvedPath)) {
+				const newToken = this.issuePreviewToken(resolvedPath);
+				const newUrl = this.buildMarkdownAssetUrl(entry, newToken, assetPath) + hashPart;
+				link.setAttribute('href', newUrl);
+				link.setAttribute('target', '_blank');
 			}
-			const newToken = this.issuePreviewToken(resolvedPath);
-			const newUrl = this.buildMarkdownPreviewUrl(entry, newToken) + hashPart;
-			link.setAttribute('href', newUrl);
-			link.setAttribute('target', '_blank');
 		}
 	}
 
@@ -1234,9 +1243,9 @@ export default class LocalServerPlugin extends Plugin {
 					this.sendResponse(res, statusCode, 'Forbidden', startTime, entry.name, req.method, req.url);
 					return;
 				}
-				if (!this.isImageFile(resolvedAssetPath)) {
+				if (!this.isImageFile(resolvedAssetPath) && !this.isPdfFile(resolvedAssetPath)) {
 					statusCode = 403;
-					this.sendResponse(res, statusCode, 'Forbidden: Not an image.', startTime, entry.name, req.method, req.url);
+					this.sendResponse(res, statusCode, 'Forbidden: Not an image or PDF.', startTime, entry.name, req.method, req.url);
 					return;
 				}
 				let stats: fs.Stats;
