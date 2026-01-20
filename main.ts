@@ -37,7 +37,7 @@ const MARKDOWN_PREVIEW_TOKEN_TTL_MS = 2 * 60 * 1000;
 interface ServerEntrySettings {
     id: string; // ユニークな識別子
     name: string; // 設定画面表示用の名前
-	host: string;
+ 	host: string;
 	port: number;
 	/** 公開するフォルダーの絶対パス */
 	serveDir: string;
@@ -47,6 +47,8 @@ interface ServerEntrySettings {
 	whitelistFiles: string[];
 	/** 認証トークンを設定すると、各リクエストで "Authorization: Bearer <token>" ヘッダーが必要になります */
 	authToken: string;
+	/** ローカルホスト（127.0.0.1）からのアクセスのみトークン認証をスキップします。セキュリティ上、信頼できる環境でのみ使用してください。 */
+	allowLocalhostNoToken: boolean;
 	/** HTTPS を有効にするか */
 	enableHttps: boolean;
 	/** SSL 証明書ファイル (.pem) のパス */
@@ -64,6 +66,7 @@ const DEFAULT_SERVER_ENTRY: ServerEntrySettings = {
     enableWhitelist: false,
     whitelistFiles: [],
     authToken: '',
+    allowLocalhostNoToken: false,
     enableHttps: false,
     sslCertPath: '',
     sslKeyPath: '',
@@ -181,19 +184,20 @@ export default class LocalServerPlugin extends Plugin {
              // 古い設定ファイルが存在し、かつ新しいserverEntries形式でない場合
              if (oldSettings && !Array.isArray(oldSettings.serverEntries) && oldSettings.host && oldSettings.port && oldSettings.serveDir !== undefined) {
                  this.log('info', 'Migrating old single server settings...');
-                 const newEntry: ServerEntrySettings = {
-                     id: typeof uuidv4 !== 'undefined' ? uuidv4() : 'migrated-server-1', // uuid がない場合は仮ID
-                     name: 'Default Server (Migrated)',
-                     host: oldSettings.host,
-                     port: oldSettings.port,
-                     serveDir: oldSettings.serveDir,
-                     enableWhitelist: oldSettings.enableWhitelist ?? DEFAULT_SERVER_ENTRY.enableWhitelist,
-                     whitelistFiles: oldSettings.whitelistFiles ?? DEFAULT_SERVER_ENTRY.whitelistFiles,
-                     authToken: oldSettings.authToken ?? DEFAULT_SERVER_ENTRY.authToken,
-                     enableHttps: oldSettings.enableHttps ?? DEFAULT_SERVER_ENTRY.enableHttps,
-                     sslCertPath: oldSettings.sslCertPath ?? DEFAULT_SERVER_ENTRY.sslCertPath,
-                     sslKeyPath: oldSettings.sslKeyPath ?? DEFAULT_SERVER_ENTRY.sslKeyPath,
-                 };
+                  const newEntry: ServerEntrySettings = {
+                      id: typeof uuidv4 !== 'undefined' ? uuidv4() : 'migrated-server-1', // uuid がない場合は仮ID
+                      name: 'Default Server (Migrated)',
+                      host: oldSettings.host,
+                      port: oldSettings.port,
+                      serveDir: oldSettings.serveDir,
+                      enableWhitelist: oldSettings.enableWhitelist ?? DEFAULT_SERVER_ENTRY.enableWhitelist,
+                      whitelistFiles: oldSettings.whitelistFiles ?? DEFAULT_SERVER_ENTRY.whitelistFiles,
+                      authToken: oldSettings.authToken ?? DEFAULT_SERVER_ENTRY.authToken,
+                      allowLocalhostNoToken: oldSettings.allowLocalhostNoToken ?? DEFAULT_SERVER_ENTRY.allowLocalhostNoToken,
+                      enableHttps: oldSettings.enableHttps ?? DEFAULT_SERVER_ENTRY.enableHttps,
+                      sslCertPath: oldSettings.sslCertPath ?? DEFAULT_SERVER_ENTRY.sslCertPath,
+                      sslKeyPath: oldSettings.sslKeyPath ?? DEFAULT_SERVER_ENTRY.sslKeyPath,
+                  };
                  this.settings.serverEntries = [newEntry];
                  await this.saveSettings(false, false); // 保存のみ
                  this.log('info', 'Migration complete.');
@@ -358,20 +362,44 @@ export default class LocalServerPlugin extends Plugin {
 		return info.filePath;
 	}
 
-	private buildMarkdownPreviewUrl(entry: ServerEntrySettings, token: string): string {
+	private buildMarkdownPreviewUrl(entry: ServerEntrySettings, token: string | null, sourcePath?: string): string {
 		const baseUrl = this.buildBaseUrl(entry);
-		const cacheBust = Date.now().toString();
-		return `${baseUrl}${MARKDOWN_PREVIEW_ENDPOINT}?token=${token}&ts=${cacheBust}`;
+		if (token) {
+			const cacheBust = Date.now().toString();
+			return `${baseUrl}${MARKDOWN_PREVIEW_ENDPOINT}?token=${token}&ts=${cacheBust}`;
+		} else if (entry.allowLocalhostNoToken && sourcePath) {
+			const vaultRelative = this.getVaultRelativePath(this.getVaultBasePath()!, sourcePath);
+			return `${baseUrl}${vaultRelative}`;
+		}
+		return `${baseUrl}${MARKDOWN_PREVIEW_ENDPOINT}?token=${token ?? ''}&ts=${Date.now()}`;
 	}
 
-	private buildMarkdownAssetUrl(entry: ServerEntrySettings, token: string, vaultPath: string): string {
+	private buildMarkdownAssetUrl(entry: ServerEntrySettings, token: string | null, vaultPath: string): string {
 		const baseUrl = this.buildBaseUrl(entry);
 		const encodedPath = encodeURIComponent(vaultPath);
-		return `${baseUrl}${MARKDOWN_PREVIEW_ASSET_ENDPOINT}?token=${token}&path=${encodedPath}`;
+		if (token) {
+			return `${baseUrl}${MARKDOWN_PREVIEW_ASSET_ENDPOINT}?token=${token}&path=${encodedPath}`;
+		} else if (entry.allowLocalhostNoToken) {
+			const vaultBasePath = this.getVaultBasePath();
+			const vaultRelative = vaultBasePath ? this.getVaultRelativePath(vaultBasePath, vaultPath) : encodedPath;
+			return `${baseUrl}${vaultRelative}`;
+		}
+		return `${baseUrl}${MARKDOWN_PREVIEW_ASSET_ENDPOINT}?token=${token ?? ''}&path=${encodedPath}`;
 	}
 
 	private isExternalUrl(url: string): boolean {
 		return /^https?:\/\//i.test(url) || /^data:/i.test(url) || /^blob:/i.test(url) || /^mailto:/i.test(url);
+	}
+
+	private isLocalhostRequest(req: http.IncomingMessage): boolean {
+		const remoteAddress = req.socket?.remoteAddress ?? '';
+		if (remoteAddress === '127.0.0.1' || remoteAddress.startsWith('127.')) {
+			return true;
+		}
+		if (remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1') {
+			return true;
+		}
+		return false;
 	}
 
 	private extractVaultPathFromAppUrl(url: string): string | null {
@@ -467,9 +495,10 @@ export default class LocalServerPlugin extends Plugin {
 		container: HTMLElement,
 		sourcePath: string,
 		entry: ServerEntrySettings,
-		token: string
+		token: string | null
 	): void {
 		const images = Array.from(container.querySelectorAll('img'));
+		const useToken = !entry.allowLocalhostNoToken;
 		for (const img of images) {
 			const rawSrc = img.getAttribute('src') ?? '';
 			const dataSrc = img.getAttribute('data-src') ?? '';
@@ -481,7 +510,11 @@ export default class LocalServerPlugin extends Plugin {
 			if (!assetPath) {
 				continue;
 			}
-			img.setAttribute('src', this.buildMarkdownAssetUrl(entry, token, assetPath));
+			let tokenToUse: string | null = useToken ? token : null;
+			if (useToken) {
+				tokenToUse = token;
+			}
+			img.setAttribute('src', this.buildMarkdownAssetUrl(entry, tokenToUse, assetPath));
 			if (dataSrc) {
 				img.removeAttribute('data-src');
 			}
@@ -527,13 +560,19 @@ export default class LocalServerPlugin extends Plugin {
 				continue;
 			}
 			if (this.isMarkdownFile(resolvedPath)) {
-				const newToken = this.issuePreviewToken(resolvedPath);
-				const newUrl = this.buildMarkdownPreviewUrl(entry, newToken) + hashPart;
+				let token: string | null = null;
+				if (!entry.allowLocalhostNoToken) {
+					token = this.issuePreviewToken(resolvedPath);
+				}
+				const newUrl = this.buildMarkdownPreviewUrl(entry, token, resolvedPath) + hashPart;
 				link.setAttribute('href', newUrl);
 				link.setAttribute('target', '_blank');
 			} else if (this.isPdfFile(resolvedPath)) {
-				const newToken = this.issuePreviewToken(resolvedPath);
-				const newUrl = this.buildMarkdownAssetUrl(entry, newToken, assetPath) + hashPart;
+				let token: string | null = null;
+				if (!entry.allowLocalhostNoToken) {
+					token = this.issuePreviewToken(resolvedPath);
+				}
+				const newUrl = this.buildMarkdownAssetUrl(entry, token, assetPath) + hashPart;
 				link.setAttribute('href', newUrl);
 				link.setAttribute('target', '_blank');
 			}
@@ -782,6 +821,7 @@ export default class LocalServerPlugin extends Plugin {
 			enableWhitelist: typeof entry.enableWhitelist === 'boolean' ? entry.enableWhitelist : DEFAULT_SERVER_ENTRY.enableWhitelist,
 			whitelistFiles,
 			authToken: typeof entry.authToken === 'string' ? entry.authToken : DEFAULT_SERVER_ENTRY.authToken,
+			allowLocalhostNoToken: typeof entry.allowLocalhostNoToken === 'boolean' ? entry.allowLocalhostNoToken : DEFAULT_SERVER_ENTRY.allowLocalhostNoToken,
 			enableHttps: typeof entry.enableHttps === 'boolean' ? entry.enableHttps : DEFAULT_SERVER_ENTRY.enableHttps,
 			sslCertPath: typeof entry.sslCertPath === 'string' ? entry.sslCertPath : DEFAULT_SERVER_ENTRY.sslCertPath,
 			sslKeyPath: typeof entry.sslKeyPath === 'string' ? entry.sslKeyPath : DEFAULT_SERVER_ENTRY.sslKeyPath,
@@ -1171,7 +1211,34 @@ export default class LocalServerPlugin extends Plugin {
 			if (pathname === MARKDOWN_PREVIEW_ENDPOINT) {
 				// 一時トークン経由で Vault 内の Markdown をプレビューする専用エンドポイント。
 				const previewToken = searchParams?.get('token') ?? '';
-				const previewPath = this.resolvePreviewToken(previewToken);
+				let previewPath: string | null = null;
+				if (!previewToken && entry.allowLocalhostNoToken && this.isLocalhostRequest(req)) {
+					const urlPath = new URL(req.url ?? '', `http://${entry.host}:${entry.port}`).pathname;
+					const vaultBasePath = this.getVaultBasePath();
+					if (!vaultBasePath) {
+						statusCode = 503;
+						this.sendResponse(res, statusCode, 'Service Unavailable', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					const normalizedPath = urlPath.replace(/^\/+/, '');
+					const absolutePath = path.join(vaultBasePath, normalizedPath);
+					let resolvedPath: string;
+					try {
+						resolvedPath = fs.realpathSync(absolutePath);
+					} catch {
+						statusCode = 404;
+						this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					if (!this.isPathInside(vaultBasePath, resolvedPath)) {
+						statusCode = 403;
+						this.sendResponse(res, statusCode, 'Forbidden: File is outside vault.', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					previewPath = resolvedPath;
+				} else {
+					previewPath = this.resolvePreviewToken(previewToken);
+				}
 				if (!previewPath) {
 					statusCode = 403;
 					this.sendResponse(res, statusCode, 'Forbidden: Invalid or expired preview token.', startTime, entry.name, req.method, req.url);
@@ -1207,7 +1274,42 @@ export default class LocalServerPlugin extends Plugin {
 			if (pathname === MARKDOWN_PREVIEW_ASSET_ENDPOINT) {
 				// プレビュー HTML 内で参照される画像ファイルを安全に返す。
 				const previewToken = searchParams?.get('token') ?? '';
-				const previewPath = this.resolvePreviewToken(previewToken);
+				let previewPath: string | null = null;
+				if (!previewToken && entry.allowLocalhostNoToken && this.isLocalhostRequest(req)) {
+					const assetPathRaw = searchParams?.get('path') ?? '';
+					let assetVaultPath: string;
+					try {
+						assetVaultPath = decodeURIComponent(assetPathRaw);
+					} catch {
+						statusCode = 400;
+						this.sendResponse(res, statusCode, 'Bad Request: Invalid asset path.', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					const vaultBasePath = this.getVaultBasePath();
+					if (!vaultBasePath) {
+						statusCode = 503;
+						this.sendResponse(res, statusCode, 'Service Unavailable', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					const normalizedVaultPath = assetVaultPath.replace(/^\/+/, '');
+					const absoluteAssetPath = path.join(vaultBasePath, normalizedVaultPath);
+					let resolvedAssetPath: string;
+					try {
+						resolvedAssetPath = fs.realpathSync(absoluteAssetPath);
+					} catch {
+						statusCode = 404;
+						this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					if (!this.isPathInside(vaultBasePath, resolvedAssetPath)) {
+						statusCode = 403;
+						this.sendResponse(res, statusCode, 'Forbidden', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					previewPath = resolvedAssetPath;
+				} else {
+					previewPath = this.resolvePreviewToken(previewToken);
+				}
 				if (!previewPath) {
 					statusCode = 403;
 					this.sendResponse(res, statusCode, 'Forbidden: Invalid or expired preview token.', startTime, entry.name, req.method, req.url);
@@ -1963,7 +2065,7 @@ export default class LocalServerPlugin extends Plugin {
 		markdown: string,
 		sourcePath: string,
 		entry: ServerEntrySettings,
-		token: string,
+		token: string | null,
 		mathPlaceholders: Map<string, { mode: 'inline' | 'block'; content: string }>
 	): Promise<string> {
 		const container = document.createElement('div');
@@ -4050,6 +4152,20 @@ class LocalServerSettingTab extends PluginSettingTab {
                         });
                     text.inputEl.type = 'password';
                 });
+
+            new Setting(entryEl)
+                .setName('Allow localhost access without token')
+                .setDesc('ローカルホスト（127.0.0.1）からのアクセスのみトークン認証をスキップします。他の環境からはトークン必須です。セキュリティ上、信頼できる環境でのみ使用してください。')
+                .addToggle(toggle =>
+                    toggle
+                        .setValue(entry.allowLocalhostNoToken)
+                        .onChange(async (value: boolean) => {
+                            if (entry.allowLocalhostNoToken !== value) {
+                                entry.allowLocalhostNoToken = value;
+                                await this.plugin.saveSettings(false);
+                            }
+                        })
+                );
 
 
             entryEl.createEl('h4', { text: 'Whitelist Settings (per entry)' });
