@@ -371,7 +371,7 @@ export default class LocalServerPlugin extends Plugin {
 			const vaultRelative = this.getVaultRelativePath(this.getVaultBasePath()!, sourcePath);
 			return `${baseUrl}${vaultRelative}`;
 		}
-		return `${baseUrl}${MARKDOWN_PREVIEW_ENDPOINT}?token=${token ?? ''}&ts=${Date.now()}`;
+		throw new Error('Token is required for preview URL generation.');
 	}
 
 	private buildMarkdownAssetUrl(entry: ServerEntrySettings, token: string | null, vaultPath: string): string {
@@ -393,7 +393,7 @@ export default class LocalServerPlugin extends Plugin {
 
 	private isLocalhostRequest(req: http.IncomingMessage): boolean {
 		const remoteAddress = req.socket?.remoteAddress ?? '';
-		if (remoteAddress === '127.0.0.1' || remoteAddress.startsWith('127.')) {
+		if (remoteAddress === '127.0.0.1') {
 			return true;
 		}
 		if (remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1') {
@@ -560,18 +560,12 @@ export default class LocalServerPlugin extends Plugin {
 				continue;
 			}
 			if (this.isMarkdownFile(resolvedPath)) {
-				let token: string | null = null;
-				if (!entry.allowLocalhostNoToken) {
-					token = this.issuePreviewToken(resolvedPath);
-				}
+				const token = entry.allowLocalhostNoToken ? null : this.issuePreviewToken(resolvedPath);
 				const newUrl = this.buildMarkdownPreviewUrl(entry, token, resolvedPath) + hashPart;
 				link.setAttribute('href', newUrl);
 				link.setAttribute('target', '_blank');
 			} else if (this.isPdfFile(resolvedPath)) {
-				let token: string | null = null;
-				if (!entry.allowLocalhostNoToken) {
-					token = this.issuePreviewToken(resolvedPath);
-				}
+				const token = entry.allowLocalhostNoToken ? null : this.issuePreviewToken(resolvedPath);
 				const newUrl = this.buildMarkdownAssetUrl(entry, token, assetPath) + hashPart;
 				link.setAttribute('href', newUrl);
 				link.setAttribute('target', '_blank');
@@ -1213,7 +1207,9 @@ export default class LocalServerPlugin extends Plugin {
 				const previewToken = searchParams?.get('token') ?? '';
 				let previewPath: string | null = null;
 				if (!previewToken && entry.allowLocalhostNoToken && this.isLocalhostRequest(req)) {
-					const urlPath = new URL(req.url ?? '', `http://${entry.host}:${entry.port}`).pathname;
+					const requestProtocol = entry.enableHttps ? 'https' : 'http';
+					const baseUrl = `${requestProtocol}://${entry.host}:${entry.port}`;
+					const urlPath = new URL(req.url ?? '/', baseUrl).pathname;
 					const vaultBasePath = this.getVaultBasePath();
 					if (!vaultBasePath) {
 						statusCode = 503;
