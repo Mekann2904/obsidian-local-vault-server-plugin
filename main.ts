@@ -483,6 +483,54 @@ export default class LocalServerPlugin extends Plugin {
 		}
 	}
 
+	private rewriteMarkdownPreviewLinks(
+		container: HTMLElement,
+		sourcePath: string,
+		entry: ServerEntrySettings
+	): void {
+		const links = Array.from(container.querySelectorAll('a'));
+		const vaultBasePath = this.getVaultBasePath();
+		for (const link of links) {
+			const href = link.getAttribute('href');
+			if (!href || this.isExternalUrl(href)) {
+				continue;
+			}
+			const hashMatch = href.match(/^(.*?)(#.*)?$/);
+			const pathPart = hashMatch ? hashMatch[1] ?? href : href;
+			const hashPart = hashMatch?.[2] ?? '';
+			if (!pathPart && !hashPart) {
+				continue;
+			}
+			if (!pathPart) {
+				continue;
+			}
+			const assetPath = this.resolveVaultAssetPath(pathPart, sourcePath);
+			if (!assetPath) {
+				continue;
+			}
+			if (!vaultBasePath) {
+				continue;
+			}
+			const absolutePath = path.join(vaultBasePath, assetPath);
+			let resolvedPath: string;
+			try {
+				resolvedPath = fs.realpathSync(absolutePath);
+			} catch {
+				continue;
+			}
+			if (!this.isPathInside(vaultBasePath, resolvedPath)) {
+				continue;
+			}
+			if (!this.isMarkdownFile(resolvedPath)) {
+				continue;
+			}
+			const newToken = this.issuePreviewToken(resolvedPath);
+			const newUrl = this.buildMarkdownPreviewUrl(entry, newToken) + hashPart;
+			link.setAttribute('href', newUrl);
+			link.setAttribute('target', '_blank');
+		}
+	}
+
 	private prepareMarkdownForPreview(markdown: string, sourcePath: string): {
 		markdown: string;
 		mathPlaceholders: Map<string, { mode: 'inline' | 'block'; content: string }>;
@@ -1913,6 +1961,7 @@ export default class LocalServerPlugin extends Plugin {
 		const tempComponent = new Component();
 		await MarkdownRenderer.render(this.app, markdown, container, sourcePath, tempComponent);
 		this.rewriteMarkdownPreviewAssets(container, sourcePath, entry, token);
+		this.rewriteMarkdownPreviewLinks(container, sourcePath, entry);
 		this.restoreMathPlaceholders(container, mathPlaceholders);
 		const renderedHtml = container.innerHTML;
 		// 一時コンポーネントを破棄してプレビュー用の子コンポーネントを回収する。
