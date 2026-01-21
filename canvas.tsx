@@ -1,9 +1,77 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot, Root } from 'react-dom/client';
-import ReactFlow, { Background, Controls, Edge, Node, applyNodeChanges, NodeChange, useReactFlow, ReactFlowProvider } from 'reactflow';
-import reactFlowStyles from 'reactflow/dist/style.css';
+import {
+	addEdge,
+	applyEdgeChanges,
+	applyNodeChanges,
+	Background,
+	Connection,
+	ConnectionLineType,
+	Controls,
+	Edge,
+	EdgeChange,
+	Handle,
+	Node,
+	NodeChange,
+	Panel,
+	Position,
+	ReactFlow,
+	ReactFlowProvider,
+	SelectionMode,
+	Viewport,
+	ViewportPortal,
+	XYPosition,
+	useReactFlow,
+	useStore,
+} from '@xyflow/react';
+import reactFlowStyles from '@xyflow/react/dist/style.css';
+import { v4 as uuidv4 } from 'uuid';
 
 type CanvasDirection = 'parent' | 'child' | 'info' | 'knowledge';
+type CanvasTool = 'select' | 'draw' | 'rect' | 'eraser' | 'lasso';
+
+interface CanvasStrokeBase {
+	id: string;
+	type: 'freehand' | 'rect';
+}
+
+interface CanvasStrokeFreehand extends CanvasStrokeBase {
+	type: 'freehand';
+	points: XYPosition[];
+}
+
+interface CanvasStrokeRect extends CanvasStrokeBase {
+	type: 'rect';
+	start: XYPosition;
+	end: XYPosition;
+}
+
+type CanvasStroke = CanvasStrokeFreehand | CanvasStrokeRect;
+
+interface CanvasSnapshot {
+	nodes: CanvasNode[];
+	edges: Edge[];
+	strokes: CanvasStroke[];
+	viewport: Viewport;
+}
+
+interface ContextMenuState {
+	x: number;
+	y: number;
+	context: 'pane' | 'node' | 'edge';
+	nodeId?: string;
+	edgeId?: string;
+}
+
+type CanvasNode = Node<CanvasNodeData>;
+
+interface CanvasNodeLookupEntry {
+	id: string;
+	positionAbsolute: XYPosition;
+	measured?: { width?: number; height?: number };
+	width?: number;
+	height?: number;
+}
 
 interface CanvasNodePayload {
 	id: string;
@@ -42,12 +110,87 @@ interface CanvasNodeData {
 	nodeId: string;
 	onResize: (nodeId: string, width: number) => void;
 	maxWidth: number;
+	[key: string]: unknown;
 }
 
 const CANVAS_WIDTH_STORAGE_KEY = 'local-vault-canvas-node-width';
 const CANVAS_WIDTHS_STORAGE_KEY = 'local-vault-canvas-node-widths';
 const CANVAS_POSITIONS_STORAGE_KEY = 'local-vault-canvas-node-positions';
+const CANVAS_STROKES_STORAGE_KEY = 'local-vault-canvas-strokes';
+const CANVAS_VIEWPORT_STORAGE_KEY = 'local-vault-canvas-viewport';
+const CANVAS_SNAPSHOT_STORAGE_KEY = 'local-vault-canvas-snapshot';
 const STYLE_ID = 'local-vault-reactflow-style';
+
+const CANVAS_CUSTOM_STYLES = `
+.local-vault-canvas-toolbar {
+	background: rgba(30, 32, 36, 0.82);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 10px;
+	padding: 6px;
+	display: flex;
+	gap: 6px;
+	align-items: center;
+	backdrop-filter: blur(8px);
+	color: #f4f6f8;
+}
+
+.local-vault-canvas-toolbar button {
+	background: rgba(255, 255, 255, 0.08);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	border-radius: 8px;
+	color: inherit;
+	font-size: 12px;
+	padding: 4px 8px;
+	cursor: pointer;
+}
+
+.local-vault-canvas-toolbar button.is-active {
+	background: #2f9ff8;
+	border-color: #2f9ff8;
+	color: #08121f;
+}
+
+.local-vault-canvas-context {
+	position: absolute;
+	background: rgba(25, 28, 31, 0.95);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	border-radius: 10px;
+	padding: 6px;
+	color: #f4f6f8;
+	box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+	z-index: 40;
+}
+
+.local-vault-canvas-context button {
+	display: block;
+	width: 100%;
+	background: transparent;
+	border: none;
+	color: inherit;
+	text-align: left;
+	padding: 6px 10px;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.local-vault-canvas-context button:hover {
+	background: rgba(255, 255, 255, 0.08);
+}
+
+.local-vault-canvas-handle {
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: #94b4ff;
+	border: 1px solid #10213d;
+}
+
+.local-vault-canvas-helper-line {
+	stroke: rgba(46, 204, 113, 0.7);
+	stroke-width: 2;
+	stroke-dasharray: 6 6;
+}
+`;
 
 const ensureReactFlowStyles = () => {
 	if (document.getElementById(STYLE_ID)) {
@@ -55,7 +198,7 @@ const ensureReactFlowStyles = () => {
 	}
 	const style = document.createElement('style');
 	style.id = STYLE_ID;
-	style.textContent = reactFlowStyles;
+	style.textContent = reactFlowStyles + '\n' + CANVAS_CUSTOM_STYLES;
 	document.head.appendChild(style);
 };
 
@@ -82,6 +225,28 @@ const buildCanvasUrl = (config: CanvasConfig) => {
 	}
 	params.set('depth', String(config.depth));
 	return config.endpoint + '?' + params.toString();
+};
+
+const distanceBetween = (a: XYPosition, b: XYPosition) => {
+	const dx = a.x - b.x;
+	const dy = a.y - b.y;
+	return Math.sqrt(dx * dx + dy * dy);
+};
+
+const pointInPolygon = (point: XYPosition, polygon: XYPosition[]) => {
+	let inside = false;
+	for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+		const xi = polygon[i].x;
+		const yi = polygon[i].y;
+		const xj = polygon[j].x;
+		const yj = polygon[j].y;
+		const intersect = yi > point.y !== yj > point.y &&
+			point.x < ((xj - xi) * (point.y - yi)) / (yj - yi) + xi;
+		if (intersect) {
+			inside = !inside;
+		}
+	}
+	return inside;
 };
 
 const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNodeData }) => {
@@ -111,6 +276,10 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 			className={data.isRoot ? 'local-vault-canvas-node is-root' : 'local-vault-canvas-node'}
 			style={{ width: data.width }}
 		>
+			<Handle type="target" position={Position.Top} className="local-vault-canvas-handle" />
+			<Handle type="target" position={Position.Left} className="local-vault-canvas-handle" />
+			<Handle type="source" position={Position.Bottom} className="local-vault-canvas-handle" />
+			<Handle type="source" position={Position.Right} className="local-vault-canvas-handle" />
 			<div className="local-vault-canvas-node-title">{data.title}</div>
 			<div className="local-vault-canvas-node-body" dangerouslySetInnerHTML={{ __html: data.contentHtml }} />
 			<div className="local-vault-canvas-node-resize" onPointerDown={onPointerDown} />
@@ -118,20 +287,48 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 	);
 };
 
-	const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: CanvasConfig }) => {
-		const [graph, setGraph] = useState<CanvasGraphPayload | null>(null);
-		const [status, setStatus] = useState<string>('');
-		const [nodeWidth, setNodeWidth] = useState<number>(config.nodeWidth);
-		const [nodeWidths, setNodeWidths] = useState<Record<string, number>>({});
-		const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
-		const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
-		const [nodes, setNodes] = useState<Node<CanvasNodeData>[]>([]);
-		const [edges, setEdges] = useState<Edge[]>([]);
-		const containerRef = useRef<HTMLDivElement | null>(null);
-		const { fitView } = useReactFlow();
-		const storageScope = config.path || '';
-		const widthsStorageKey = scopedStorageKey(CANVAS_WIDTHS_STORAGE_KEY, storageScope);
-		const positionsStorageKey = scopedStorageKey(CANVAS_POSITIONS_STORAGE_KEY, storageScope);
+const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: CanvasConfig }) => {
+	const [graph, setGraph] = useState<CanvasGraphPayload | null>(null);
+	const [status, setStatus] = useState<string>('');
+	const [nodeWidth, setNodeWidth] = useState<number>(config.nodeWidth);
+	const [nodeWidths, setNodeWidths] = useState<Record<string, number>>({});
+	const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
+	const [viewportSize, setViewportSize] = useState({ width: window.innerWidth, height: window.innerHeight });
+	const [nodes, setNodes] = useState<Node<CanvasNodeData>[]>([]);
+	const [edges, setEdges] = useState<Edge[]>([]);
+	const [strokes, setStrokes] = useState<CanvasStroke[]>([]);
+	const [draftStroke, setDraftStroke] = useState<CanvasStroke | null>(null);
+	const [lassoPoints, setLassoPoints] = useState<XYPosition[]>([]);
+	const [activeTool, setActiveTool] = useState<CanvasTool>('select');
+	const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+	const [helperLines, setHelperLines] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
+	const [historyIndex, setHistoryIndex] = useState(0);
+	const [restoredViewport, setRestoredViewport] = useState<Viewport | null>(null);
+	const containerRef = useRef<HTMLDivElement | null>(null);
+	const clipboardRef = useRef<{ nodes: Node<CanvasNodeData>[]; edges: Edge[] } | null>(null);
+	const historyRef = useRef<CanvasSnapshot[]>([]);
+	const historyTimerRef = useRef<number | null>(null);
+	const isRestoringRef = useRef(false);
+	const isPointerDownRef = useRef(false);
+	const multiSelectionKey = useMemo(
+		() => (navigator.platform.includes('Mac') ? 'Meta' : 'Control'),
+		[]
+	);
+	const {
+		fitView,
+		screenToFlowPosition,
+		setViewport: applyViewport,
+		getViewport,
+		getNodes: getCurrentNodes,
+		getEdges: getCurrentEdges,
+	} = useReactFlow();
+	const nodeLookup = useStore((state) => state.nodeLookup) as unknown as Map<string, CanvasNodeLookupEntry>;
+	const storageScope = config.path || '';
+	const widthsStorageKey = scopedStorageKey(CANVAS_WIDTHS_STORAGE_KEY, storageScope);
+	const positionsStorageKey = scopedStorageKey(CANVAS_POSITIONS_STORAGE_KEY, storageScope);
+	const strokesStorageKey = scopedStorageKey(CANVAS_STROKES_STORAGE_KEY, storageScope);
+	const viewportStorageKey = scopedStorageKey(CANVAS_VIEWPORT_STORAGE_KEY, storageScope);
+	const snapshotStorageKey = scopedStorageKey(CANVAS_SNAPSHOT_STORAGE_KEY, storageScope);
 
 	useEffect(() => {
 		ensureReactFlowStyles();
@@ -171,15 +368,43 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 		} else {
 			setNodePositions({});
 		}
-	}, [widthsStorageKey, positionsStorageKey]);
+		const storedStrokes = localStorage.getItem(strokesStorageKey);
+		if (storedStrokes) {
+			try {
+				const parsed = JSON.parse(storedStrokes) as CanvasStroke[];
+				setStrokes(parsed || []);
+			} catch {
+				setStrokes([]);
+			}
+		} else {
+			setStrokes([]);
+		}
+		const storedViewport = localStorage.getItem(viewportStorageKey);
+		if (storedViewport) {
+			try {
+				const parsed = JSON.parse(storedViewport) as Viewport;
+				setRestoredViewport(parsed || null);
+			} catch {
+				setRestoredViewport(null);
+			}
+		} else {
+			setRestoredViewport(null);
+		}
+	}, [positionsStorageKey, strokesStorageKey, viewportStorageKey, widthsStorageKey]);
 
 	useEffect(() => {
 		const handleResize = () => {
-			setViewport({ width: window.innerWidth, height: window.innerHeight });
+			setViewportSize({ width: window.innerWidth, height: window.innerHeight });
 		};
 		window.addEventListener('resize', handleResize);
 		return () => window.removeEventListener('resize', handleResize);
 	}, []);
+
+	useEffect(() => {
+		if (restoredViewport) {
+			applyViewport(restoredViewport, { duration: 0 });
+		}
+	}, [applyViewport, restoredViewport]);
 
 	const updateNodeWidth = useCallback((nodeId: string, width: number) => {
 		const maxWidth = Math.max(900, Math.floor(window.innerWidth - 80));
@@ -198,7 +423,7 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 					: node
 			)
 		);
-	}, []);
+	}, [widthsStorageKey]);
 
 	useEffect(() => {
 		const depth = clampNumber(config.depth, 1, config.maxDepth);
@@ -229,6 +454,395 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 		};
 	}, [config]);
 
+	const pushHistory = useCallback((snapshot: CanvasSnapshot) => {
+		if (isRestoringRef.current) {
+			return;
+		}
+		setHistoryIndex((current) => {
+			const trimmed = historyRef.current.slice(0, current + 1);
+			trimmed.push(snapshot);
+			historyRef.current = trimmed;
+			return trimmed.length - 1;
+		});
+	}, []);
+
+	const buildSnapshot = useCallback((): CanvasSnapshot => {
+		return {
+			nodes,
+			edges,
+			strokes,
+			viewport: getViewport(),
+		};
+	}, [nodes, edges, strokes, getViewport]);
+
+	const restoreSnapshot = useCallback((snapshot: CanvasSnapshot) => {
+		isRestoringRef.current = true;
+		setNodes(snapshot.nodes);
+		setEdges(snapshot.edges);
+		setStrokes(snapshot.strokes);
+		applyViewport(snapshot.viewport, { duration: 0 });
+		localStorage.setItem(snapshotStorageKey, JSON.stringify(snapshot));
+		localStorage.setItem(strokesStorageKey, JSON.stringify(snapshot.strokes));
+		localStorage.setItem(viewportStorageKey, JSON.stringify(snapshot.viewport));
+		setTimeout(() => {
+			isRestoringRef.current = false;
+		}, 0);
+	}, [applyViewport, snapshotStorageKey, strokesStorageKey, viewportStorageKey]);
+
+	const scheduleHistoryPush = useCallback(() => {
+		if (historyTimerRef.current) {
+			window.clearTimeout(historyTimerRef.current);
+		}
+		historyTimerRef.current = window.setTimeout(() => {
+			const snapshot = buildSnapshot();
+			localStorage.setItem(snapshotStorageKey, JSON.stringify(snapshot));
+			pushHistory(snapshot);
+		}, 200);
+	}, [buildSnapshot, pushHistory, snapshotStorageKey]);
+
+	const handleUndo = useCallback(() => {
+		setHistoryIndex((current) => {
+			const nextIndex = Math.max(0, current - 1);
+			const snapshot = historyRef.current[nextIndex];
+			if (snapshot) {
+				restoreSnapshot(snapshot);
+			}
+			return nextIndex;
+		});
+	}, [restoreSnapshot]);
+
+	const handleRedo = useCallback(() => {
+		setHistoryIndex((current) => {
+			const nextIndex = Math.min(historyRef.current.length - 1, current + 1);
+			const snapshot = historyRef.current[nextIndex];
+			if (snapshot) {
+				restoreSnapshot(snapshot);
+			}
+			return nextIndex;
+		});
+	}, [restoreSnapshot]);
+
+	const handleCopy = useCallback(() => {
+		const selectedNodes = (getCurrentNodes() as Node<CanvasNodeData>[]).filter((node) => node.selected);
+		if (selectedNodes.length === 0) {
+			return;
+		}
+		const selectedIds = new Set(selectedNodes.map((node: Node<CanvasNodeData>) => node.id));
+		const selectedEdges = (getCurrentEdges() as Edge[]).filter(
+			(edge: Edge) => selectedIds.has(edge.source) && selectedIds.has(edge.target)
+		);
+		clipboardRef.current = { nodes: selectedNodes, edges: selectedEdges };
+	}, [getCurrentEdges, getCurrentNodes]);
+
+	const handlePaste = useCallback(() => {
+		const clipboard = clipboardRef.current;
+		if (!clipboard) {
+			return;
+		}
+		const offset = 30;
+		const idMap = new Map<string, string>();
+		const nextNodes = clipboard.nodes.map((node) => {
+			const nextId = uuidv4();
+			idMap.set(node.id, nextId);
+			return {
+				...node,
+				id: nextId,
+				position: { x: node.position.x + offset, y: node.position.y + offset },
+				data: { ...node.data, nodeId: nextId },
+			};
+		});
+		const nextEdges = clipboard.edges.map((edge) => ({
+			...edge,
+			id: uuidv4(),
+			source: idMap.get(edge.source) ?? edge.source,
+			target: idMap.get(edge.target) ?? edge.target,
+		}));
+		setNodes((current) => [...current, ...nextNodes]);
+		setEdges((current) => [...current, ...nextEdges]);
+		setNodePositions((prev) => {
+			const next = { ...prev };
+			nextNodes.forEach((node) => {
+				next[node.id] = { x: node.position.x, y: node.position.y };
+			});
+			localStorage.setItem(positionsStorageKey, JSON.stringify(next));
+			return next;
+		});
+		scheduleHistoryPush();
+	}, [positionsStorageKey, scheduleHistoryPush]);
+
+	const handleViewportSave = useCallback(() => {
+		const snapshot = buildSnapshot();
+		localStorage.setItem(snapshotStorageKey, JSON.stringify(snapshot));
+		pushHistory(snapshot);
+	}, [buildSnapshot, pushHistory, snapshotStorageKey]);
+
+	const handleViewportRestore = useCallback(() => {
+		const stored = localStorage.getItem(snapshotStorageKey);
+		if (!stored) {
+			return;
+		}
+		try {
+			const parsed = JSON.parse(stored) as CanvasSnapshot;
+			restoreSnapshot(parsed);
+		} catch {
+			// ignore
+		}
+	}, [restoreSnapshot, snapshotStorageKey]);
+
+	const handleClearDrawings = useCallback(() => {
+		setStrokes([]);
+		localStorage.setItem(strokesStorageKey, JSON.stringify([]));
+		scheduleHistoryPush();
+	}, [scheduleHistoryPush, strokesStorageKey]);
+
+	const handleMoveEnd = useCallback((_: unknown, viewport: Viewport) => {
+		localStorage.setItem(viewportStorageKey, JSON.stringify(viewport));
+		scheduleHistoryPush();
+	}, [scheduleHistoryPush, viewportStorageKey]);
+
+	const handleNodeDrag = useCallback((_: React.MouseEvent, node: Node) => {
+		const threshold = 6;
+		let helperX: number | null = null;
+		let helperY: number | null = null;
+		const current = nodeLookup.get(node.id);
+		if (!current) {
+			return;
+		}
+		const currentWidth = current.measured?.width ?? current.width ?? 0;
+		const currentHeight = current.measured?.height ?? current.height ?? 0;
+		const currentCenter = {
+			x: current.positionAbsolute.x + currentWidth / 2,
+			y: current.positionAbsolute.y + currentHeight / 2,
+		};
+		for (const [otherId, other] of nodeLookup.entries()) {
+			if (otherId === node.id) {
+				continue;
+			}
+			const otherWidth = other.measured?.width ?? other.width ?? 0;
+			const otherHeight = other.measured?.height ?? other.height ?? 0;
+			const otherCenter = {
+				x: other.positionAbsolute.x + otherWidth / 2,
+				y: other.positionAbsolute.y + otherHeight / 2,
+			};
+			if (Math.abs(otherCenter.x - currentCenter.x) <= threshold) {
+				helperX = otherCenter.x;
+			}
+			if (Math.abs(otherCenter.y - currentCenter.y) <= threshold) {
+				helperY = otherCenter.y;
+			}
+		}
+		setHelperLines({ x: helperX, y: helperY });
+	}, [nodeLookup]);
+
+	const handleNodeDragStop = useCallback(() => {
+		setHelperLines({ x: null, y: null });
+		scheduleHistoryPush();
+	}, [scheduleHistoryPush]);
+
+	const eraseAtPoint = useCallback((point: XYPosition) => {
+		setStrokes((current) =>
+			current.filter((stroke) => {
+				if (stroke.type === 'freehand') {
+					return stroke.points.every((p) => distanceBetween(p, point) > 16);
+				}
+				const rectX = Math.min(stroke.start.x, stroke.end.x);
+				const rectY = Math.min(stroke.start.y, stroke.end.y);
+				const rectW = Math.abs(stroke.start.x - stroke.end.x);
+				const rectH = Math.abs(stroke.start.y - stroke.end.y);
+				const rectCenter = { x: rectX + rectW / 2, y: rectY + rectH / 2 };
+				return distanceBetween(rectCenter, point) > 20;
+			})
+		);
+	}, []);
+
+	const handlePaneMouseDown = useCallback((event: React.MouseEvent) => {
+		setContextMenu(null);
+		if (activeTool === 'select') {
+			return;
+		}
+		if (event.button !== 0) {
+			return;
+		}
+		isPointerDownRef.current = true;
+		event.preventDefault();
+		const point = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+		if (activeTool === 'draw') {
+			setDraftStroke({ id: uuidv4(), type: 'freehand', points: [point] });
+		} else if (activeTool === 'rect') {
+			setDraftStroke({ id: uuidv4(), type: 'rect', start: point, end: point });
+		} else if (activeTool === 'lasso') {
+			setLassoPoints([point]);
+		} else if (activeTool === 'eraser') {
+			eraseAtPoint(point);
+		}
+	}, [activeTool, eraseAtPoint, screenToFlowPosition]);
+
+	const handlePaneMouseMove = useCallback((event: React.MouseEvent) => {
+		if (!isPointerDownRef.current) {
+			return;
+		}
+		if (activeTool === 'select') {
+			return;
+		}
+		const point = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+		if (activeTool === 'draw') {
+			setDraftStroke((current) => {
+				if (!current || current.type !== 'freehand') {
+					return current;
+				}
+				return { ...current, points: [...current.points, point] };
+			});
+		} else if (activeTool === 'rect') {
+			setDraftStroke((current) => {
+				if (!current || current.type !== 'rect') {
+					return current;
+				}
+				return { ...current, end: point };
+			});
+		} else if (activeTool === 'lasso') {
+			setLassoPoints((current) => [...current, point]);
+		} else if (activeTool === 'eraser') {
+			eraseAtPoint(point);
+		}
+	}, [activeTool, eraseAtPoint, screenToFlowPosition]);
+
+	const handlePaneMouseUp = useCallback(() => {
+		if (!isPointerDownRef.current) {
+			return;
+		}
+		isPointerDownRef.current = false;
+		if (activeTool === 'draw' || activeTool === 'rect') {
+			setDraftStroke((current) => {
+				if (!current) {
+					return null;
+				}
+				setStrokes((prev) => [...prev, current]);
+				scheduleHistoryPush();
+				return null;
+			});
+		}
+		if (activeTool === 'lasso') {
+			setNodes((current) => {
+				if (lassoPoints.length < 3) {
+					return current;
+				}
+				const selectedIds = new Set<string>();
+			nodeLookup.forEach((node: CanvasNodeLookupEntry, nodeId) => {
+				const width = node.measured?.width ?? node.width ?? 0;
+				const height = node.measured?.height ?? node.height ?? 0;
+				const center = {
+					x: node.positionAbsolute.x + width / 2,
+					y: node.positionAbsolute.y + height / 2,
+				};
+				if (pointInPolygon(center, lassoPoints)) {
+					selectedIds.add(nodeId);
+				}
+			});
+				return current.map((node) => ({ ...node, selected: selectedIds.has(node.id) }));
+			});
+			setLassoPoints([]);
+		}
+		if (activeTool === 'eraser') {
+			scheduleHistoryPush();
+		}
+	}, [activeTool, lassoPoints, nodeLookup, scheduleHistoryPush]);
+
+	const handlePaneContextMenu = useCallback((event: React.MouseEvent) => {
+		event.preventDefault();
+		setContextMenu({ x: event.clientX, y: event.clientY, context: 'pane' });
+	}, []);
+
+	const handleNodeContextMenu = useCallback((event: React.MouseEvent, node: Node) => {
+		event.preventDefault();
+		setContextMenu({ x: event.clientX, y: event.clientY, context: 'node', nodeId: node.id });
+	}, []);
+
+	const handleEdgeContextMenu = useCallback((event: React.MouseEvent, edge: Edge) => {
+		event.preventDefault();
+		setContextMenu({ x: event.clientX, y: event.clientY, context: 'edge', edgeId: edge.id });
+	}, []);
+
+	const addNodeAt = useCallback((point: XYPosition) => {
+		const maxWidth = Math.max(900, Math.floor(window.innerWidth - 80));
+		const resolvedWidth = clampNumber(nodeWidth, 900, maxWidth);
+		const nextId = uuidv4();
+		const nextNode: Node<CanvasNodeData> = {
+			id: nextId,
+			type: 'note',
+			position: point,
+			data: {
+				title: 'New note',
+				contentHtml: '<p>New note</p>',
+				width: resolvedWidth,
+				isRoot: false,
+				nodeId: nextId,
+				onResize: updateNodeWidth,
+				maxWidth,
+			},
+		};
+		setNodes((current) => [...current, nextNode]);
+		setNodePositions((prev) => {
+			const next = { ...prev, [nextId]: { x: point.x, y: point.y } };
+			localStorage.setItem(positionsStorageKey, JSON.stringify(next));
+			return next;
+		});
+		scheduleHistoryPush();
+	}, [nodeWidth, positionsStorageKey, scheduleHistoryPush, updateNodeWidth]);
+
+	useEffect(() => {
+		const handleKeyDown = (event: KeyboardEvent) => {
+			const target = event.target as HTMLElement | null;
+			if (target && ['INPUT', 'TEXTAREA'].includes(target.tagName)) {
+				return;
+			}
+			if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
+				event.preventDefault();
+				handleCopy();
+				return;
+			}
+			if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'v') {
+				event.preventDefault();
+				handlePaste();
+				return;
+			}
+			if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+				event.preventDefault();
+				if (event.shiftKey) {
+					handleRedo();
+				} else {
+					handleUndo();
+				}
+				return;
+			}
+			if (event.key === 'Delete' || event.key === 'Backspace') {
+				const selectedIds = new Set(
+					(getCurrentNodes() as Node<CanvasNodeData>[])
+						.filter((node) => node.selected)
+						.map((node) => node.id)
+				);
+				setNodes((current) => current.filter((node) => !selectedIds.has(node.id)));
+				setEdges((current) =>
+					current.filter((edge) => !edge.selected && !selectedIds.has(edge.source) && !selectedIds.has(edge.target))
+				);
+				setNodePositions((prev) => {
+					const next = { ...prev };
+					selectedIds.forEach((id) => {
+						delete next[id];
+					});
+					localStorage.setItem(positionsStorageKey, JSON.stringify(next));
+					return next;
+				});
+				scheduleHistoryPush();
+			}
+		};
+		window.addEventListener('keydown', handleKeyDown);
+		return () => window.removeEventListener('keydown', handleKeyDown);
+	}, [getCurrentNodes, handleCopy, handlePaste, handleRedo, handleUndo, positionsStorageKey, scheduleHistoryPush]);
+
+	useEffect(() => {
+		localStorage.setItem(strokesStorageKey, JSON.stringify(strokes));
+	}, [strokes, strokesStorageKey]);
+
 	const nodeTypes = useMemo<Record<string, React.FC<{ data: CanvasNodeData }>>>(() => ({
 		note: NoteNode,
 	}), []);
@@ -254,25 +868,39 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 			setEdges([]);
 			return;
 		}
-		const maxWidth = Math.max(900, Math.floor(viewport.width - 80));
+		const storedSnapshot = localStorage.getItem(snapshotStorageKey);
+		if (storedSnapshot) {
+			try {
+				const parsed = JSON.parse(storedSnapshot) as CanvasSnapshot;
+				setNodes(parsed.nodes || []);
+				setEdges(parsed.edges || []);
+				setStrokes(parsed.strokes || []);
+				applyViewport(parsed.viewport || { x: 0, y: 0, zoom: 1 }, { duration: 0 });
+				pushHistory(parsed);
+				return;
+			} catch {
+				// fall through to server payload
+			}
+		}
+		const maxWidth = Math.max(900, Math.floor(viewportSize.width - 80));
 		const nextNodes: Node<CanvasNodeData>[] = graph.nodes.map((node: CanvasNodePayload) => {
 			const storedWidth = nodeWidths[node.id];
 			const resolvedWidth = clampNumber(storedWidth ?? nodeWidth, 900, maxWidth);
 			const savedPosition = nodePositions[node.id];
 			return {
-			id: node.id,
-			type: 'note',
-			position: savedPosition ? { x: savedPosition.x, y: savedPosition.y } : { x: 0, y: 0 },
-			data: {
-				title: node.title,
-				contentHtml: node.contentHtml,
-				width: resolvedWidth,
-				isRoot: node.id === graph.rootId,
-				nodeId: node.id,
-				onResize: updateNodeWidth,
-				maxWidth,
-			},
-		};
+				id: node.id,
+				type: 'note',
+				position: savedPosition ? { x: savedPosition.x, y: savedPosition.y } : { x: 0, y: 0 },
+				data: {
+					title: node.title,
+					contentHtml: node.contentHtml,
+					width: resolvedWidth,
+					isRoot: node.id === graph.rootId,
+					nodeId: node.id,
+					onResize: updateNodeWidth,
+					maxWidth,
+				},
+			};
 		});
 		const nextEdges: Edge[] = graph.edges.map((edge: CanvasEdgePayload, index: number) => ({
 			id: edge.from + '-' + edge.to + '-' + index,
@@ -284,31 +912,46 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 		}));
 		setNodes(nextNodes);
 		setEdges(nextEdges);
+		pushHistory({ nodes: nextNodes, edges: nextEdges, strokes, viewport: getViewport() });
 		setTimeout(() => {
 			fitView({ padding: 0.2, duration: 800 });
 		}, 100);
-	}, [graph, nodeWidth, viewport.width, nodeWidths, nodePositions, updateNodeWidth, fitView]);
+	}, [applyViewport, fitView, getViewport, graph, nodeWidth, nodePositions, nodeWidths, pushHistory, snapshotStorageKey, strokes, updateNodeWidth, viewportSize.width]);
 
 	const handleNodesChange = useCallback((changes: NodeChange[]) => {
-		setNodes((current) => applyNodeChanges(changes, current));
+		setNodes((current) => applyNodeChanges(changes, current) as CanvasNode[]);
 		const positionChanges = changes.filter((change): change is NodeChange & { id: string; position: { x: number; y: number } } => {
 			return change.type === 'position' && 'position' in change;
 		});
-		if (positionChanges.length === 0) {
-			return;
-		}
-		setNodePositions((prev) => {
-			const next = { ...prev };
-			positionChanges.forEach((change) => {
-				if (!change.position) {
-					return;
-				}
-				next[change.id] = { x: change.position.x, y: change.position.y };
+		if (positionChanges.length > 0) {
+			setNodePositions((prev) => {
+				const next = { ...prev };
+				positionChanges.forEach((change) => {
+					if (!change.position) {
+						return;
+					}
+					next[change.id] = { x: change.position.x, y: change.position.y };
+				});
+				localStorage.setItem(positionsStorageKey, JSON.stringify(next));
+				return next;
 			});
-			localStorage.setItem(positionsStorageKey, JSON.stringify(next));
-			return next;
-		});
-	}, [positionsStorageKey]);
+		}
+		if (changes.some((change) => change.type !== 'position')) {
+			scheduleHistoryPush();
+		}
+	}, [positionsStorageKey, scheduleHistoryPush]);
+
+	const handleEdgesChange = useCallback((changes: EdgeChange[]) => {
+		setEdges((current) => applyEdgeChanges(changes, current));
+		if (changes.length > 0) {
+			scheduleHistoryPush();
+		}
+	}, [scheduleHistoryPush]);
+
+	const handleConnect = useCallback((connection: Connection) => {
+		setEdges((current) => addEdge({ ...connection, type: 'smoothstep' }, current));
+		scheduleHistoryPush();
+	}, [scheduleHistoryPush]);
 
 	useEffect(() => {
 		if (!graph || nodes.length === 0) {
@@ -465,37 +1108,190 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 			localStorage.setItem(positionsStorageKey, JSON.stringify(next));
 			return next;
 		});
-	}, [graph, nodeWidth, nodeWidths, nodePositions, positionsStorageKey, viewport.width, viewport.height]);
+	}, [graph, nodeWidth, nodeWidths, nodePositions, positionsStorageKey, viewportSize.width, viewportSize.height]);
+
+	const renderStroke = (stroke: CanvasStroke) => {
+		if (stroke.type === 'freehand') {
+			const path = stroke.points
+				.map((point, index) => `${index === 0 ? 'M' : 'L'}${point.x},${point.y}`)
+				.join(' ');
+			return (
+				<path
+					key={stroke.id}
+					d={path}
+					fill="none"
+					stroke="#f5f5f5"
+					strokeWidth={3}
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				/>
+			);
+		}
+		const x = Math.min(stroke.start.x, stroke.end.x);
+		const y = Math.min(stroke.start.y, stroke.end.y);
+		const width = Math.abs(stroke.start.x - stroke.end.x);
+		const height = Math.abs(stroke.start.y - stroke.end.y);
+		return (
+			<rect
+				key={stroke.id}
+				x={x}
+				y={y}
+				width={width}
+				height={height}
+				fill="rgba(255, 255, 255, 0.08)"
+				stroke="#f5f5f5"
+				strokeWidth={2}
+			/>
+		);
+	};
+
+	const renderDraft = () => {
+		if (!draftStroke) {
+			return null;
+		}
+		return renderStroke(draftStroke);
+	};
+
+	const lassoPath = lassoPoints.length
+		? lassoPoints.map((point, index) => `${index === 0 ? 'M' : 'L'}${point.x},${point.y}`).join(' ') + ' Z'
+		: null;
 
 	return (
-		<div className="local-vault-canvas-app" ref={containerRef}>
-		<ReactFlow
-			nodes={nodes}
-			edges={edges}
-			nodeTypes={nodeTypes}
-			onNodesChange={handleNodesChange}
-			defaultEdgeOptions={{
-				type: 'smoothstep',
-				animated: false,
-				style: {
-					strokeWidth: 3,
-					stroke: '#666',
-					opacity: 1,
-				},
-			}}
-				panOnDrag
+		<div
+			className="local-vault-canvas-app"
+			ref={containerRef}
+			style={{ position: 'relative' }}
+			onMouseDown={handlePaneMouseDown}
+			onMouseMove={handlePaneMouseMove}
+			onMouseUp={handlePaneMouseUp}
+		>
+			<ReactFlow
+				nodes={nodes}
+				edges={edges}
+				nodeTypes={nodeTypes}
+				onNodesChange={handleNodesChange}
+				onEdgesChange={handleEdgesChange}
+				onConnect={handleConnect}
+				onNodeDrag={handleNodeDrag}
+				onNodeDragStop={handleNodeDragStop}
+				onMoveEnd={handleMoveEnd}
+				onPaneContextMenu={handlePaneContextMenu}
+				onNodeContextMenu={handleNodeContextMenu}
+				onEdgeContextMenu={handleEdgeContextMenu}
+				onPaneClick={() => setContextMenu(null)}
+				defaultEdgeOptions={{
+					type: 'smoothstep',
+					animated: false,
+					style: {
+						strokeWidth: 3,
+						stroke: '#666',
+						opacity: 1,
+					},
+				}}
+				connectionLineType={ConnectionLineType.SmoothStep}
+				connectionLineStyle={{ stroke: '#8b9cff', strokeWidth: 2 }}
+				selectionMode={SelectionMode.Partial}
+				selectionKeyCode="Shift"
+				multiSelectionKeyCode={multiSelectionKey}
+				panOnDrag={activeTool === 'select'}
 				panOnScroll
 				zoomOnScroll
 				zoomOnPinch
-				nodesDraggable
-				nodesConnectable={false}
+				selectionOnDrag={activeTool === 'select'}
+				nodesDraggable={activeTool === 'select'}
+				nodesConnectable={activeTool === 'select'}
 				minZoom={0.1}
 				maxZoom={2}
 				proOptions={{ hideAttribution: true }}
 			>
 				<Background gap={24} size={1} />
 				<Controls showInteractive={false} />
+				<Panel position="top-left">
+					<div className="local-vault-canvas-toolbar">
+						<button className={activeTool === 'select' ? 'is-active' : ''} onClick={() => setActiveTool('select')}>Select</button>
+						<button className={activeTool === 'draw' ? 'is-active' : ''} onClick={() => setActiveTool('draw')}>Draw</button>
+						<button className={activeTool === 'rect' ? 'is-active' : ''} onClick={() => setActiveTool('rect')}>Rect</button>
+						<button className={activeTool === 'eraser' ? 'is-active' : ''} onClick={() => setActiveTool('eraser')}>Eraser</button>
+						<button className={activeTool === 'lasso' ? 'is-active' : ''} onClick={() => setActiveTool('lasso')}>Lasso</button>
+						<button onClick={handleUndo}>Undo</button>
+						<button onClick={handleRedo}>Redo</button>
+						<button onClick={() => fitView({ padding: 0.2, duration: 400 })}>Fit</button>
+						<button onClick={handleViewportSave}>Save</button>
+						<button onClick={handleViewportRestore}>Restore</button>
+					</div>
+				</Panel>
+				<ViewportPortal>
+					<svg
+						width={10000}
+						height={10000}
+						viewBox="-5000 -5000 10000 10000"
+						style={{ overflow: 'visible', pointerEvents: 'none' }}
+					>
+						{strokes.map(renderStroke)}
+						{renderDraft()}
+						{lassoPath ? (
+							<path d={lassoPath} fill="rgba(61, 166, 255, 0.12)" stroke="#3da6ff" strokeWidth={2} />
+						) : null}
+						{helperLines.x !== null ? (
+							<line className="local-vault-canvas-helper-line" x1={helperLines.x} y1={-5000} x2={helperLines.x} y2={5000} />
+						) : null}
+						{helperLines.y !== null ? (
+							<line className="local-vault-canvas-helper-line" x1={-5000} y1={helperLines.y} x2={5000} y2={helperLines.y} />
+						) : null}
+					</svg>
+				</ViewportPortal>
 			</ReactFlow>
+			{contextMenu ? (
+				<div className="local-vault-canvas-context" style={{ left: contextMenu.x, top: contextMenu.y }}>
+					{contextMenu.context === 'pane' ? (
+						<>
+							<button onClick={() => {
+								addNodeAt(screenToFlowPosition({ x: contextMenu.x, y: contextMenu.y }));
+								setContextMenu(null);
+							}}>Add note</button>
+							<button onClick={() => {
+								handlePaste();
+								setContextMenu(null);
+							}}>Paste</button>
+							<button onClick={() => {
+								handleViewportSave();
+								setContextMenu(null);
+							}}>Save view</button>
+							<button onClick={() => {
+								handleViewportRestore();
+								setContextMenu(null);
+							}}>Restore view</button>
+							<button onClick={() => {
+								handleClearDrawings();
+								setContextMenu(null);
+							}}>Clear drawings</button>
+						</>
+					) : null}
+					{contextMenu.context === 'node' ? (
+						<>
+							<button onClick={() => {
+								handleCopy();
+								setContextMenu(null);
+							}}>Copy</button>
+							<button onClick={() => {
+								setNodes((current) => current.filter((node) => node.id !== contextMenu.nodeId));
+								setEdges((current) => current.filter((edge) => edge.source !== contextMenu.nodeId && edge.target !== contextMenu.nodeId));
+								scheduleHistoryPush();
+								setContextMenu(null);
+							}}>Delete</button>
+						</>
+					) : null}
+					{contextMenu.context === 'edge' ? (
+						<>
+							<button onClick={() => {
+								setEdges((current) => current.filter((edge) => edge.id !== contextMenu.edgeId));
+								scheduleHistoryPush();
+								setContextMenu(null);
+							}}>Delete</button>
+						</>
+					) : null}
+				</div>
+			) : null}
 			<div className="local-vault-canvas-status">{status}</div>
 		</div>
 	);
