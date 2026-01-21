@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot, Root } from 'react-dom/client';
-import ReactFlow, { Background, Controls, Edge, Node } from 'reactflow';
+import ReactFlow, { Background, Controls, Edge, Node, applyNodeChanges, NodeChange } from 'reactflow';
 import reactFlowStyles from 'reactflow/dist/style.css';
 
 type CanvasDirection = 'parent' | 'child' | 'info' | 'knowledge';
@@ -39,11 +39,14 @@ interface CanvasNodeData {
 	contentHtml: string;
 	width: number;
 	isRoot: boolean;
-	onResize: (width: number) => void;
+	nodeId: string;
+	onResize: (nodeId: string, width: number) => void;
 	maxWidth: number;
 }
 
 const CANVAS_WIDTH_STORAGE_KEY = 'local-vault-canvas-node-width';
+const CANVAS_WIDTHS_STORAGE_KEY = 'local-vault-canvas-node-widths';
+const CANVAS_POSITIONS_STORAGE_KEY = 'local-vault-canvas-node-positions';
 const STYLE_ID = 'local-vault-reactflow-style';
 
 const ensureReactFlowStyles = () => {
@@ -84,7 +87,7 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 			const handlePointerMove = (moveEvent: PointerEvent) => {
 				const delta = moveEvent.clientX - startX;
 				const nextWidth = clampNumber(startWidth + delta, 900, data.maxWidth);
-				data.onResize(nextWidth);
+				data.onResize(data.nodeId, nextWidth);
 			};
 			const handlePointerUp = () => {
 				window.removeEventListener('pointermove', handlePointerMove);
@@ -112,6 +115,8 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 	const [graph, setGraph] = useState<CanvasGraphPayload | null>(null);
 	const [status, setStatus] = useState<string>('');
 	const [nodeWidth, setNodeWidth] = useState<number>(config.nodeWidth);
+	const [nodeWidths, setNodeWidths] = useState<Record<string, number>>({});
+	const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
 	const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
 	const [nodes, setNodes] = useState<Node<CanvasNodeData>[]>([]);
 	const [edges, setEdges] = useState<Edge[]>([]);
@@ -133,6 +138,27 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 	}, []);
 
 	useEffect(() => {
+		const storedWidths = localStorage.getItem(CANVAS_WIDTHS_STORAGE_KEY);
+		if (storedWidths) {
+			try {
+				const parsed = JSON.parse(storedWidths) as Record<string, number>;
+				setNodeWidths(parsed || {});
+			} catch {
+				setNodeWidths({});
+			}
+		}
+		const storedPositions = localStorage.getItem(CANVAS_POSITIONS_STORAGE_KEY);
+		if (storedPositions) {
+			try {
+				const parsed = JSON.parse(storedPositions) as Record<string, { x: number; y: number }>;
+				setNodePositions(parsed || {});
+			} catch {
+				setNodePositions({});
+			}
+		}
+	}, []);
+
+	useEffect(() => {
 		const handleResize = () => {
 			setViewport({ width: window.innerWidth, height: window.innerHeight });
 		};
@@ -140,15 +166,24 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 		return () => window.removeEventListener('resize', handleResize);
 	}, []);
 
-	const updateNodeWidth = useCallback(
-		(width: number) => {
-			const maxWidth = Math.max(900, Math.floor(window.innerWidth - 80));
-			const clamped = clampNumber(width, 900, maxWidth);
-			setNodeWidth(clamped);
-			localStorage.setItem(CANVAS_WIDTH_STORAGE_KEY, String(clamped));
-		},
-		[]
-	);
+	const updateNodeWidth = useCallback((nodeId: string, width: number) => {
+		const maxWidth = Math.max(900, Math.floor(window.innerWidth - 80));
+		const clamped = clampNumber(width, 900, maxWidth);
+		setNodeWidth(clamped);
+		setNodeWidths((prev) => {
+			const next = { ...prev, [nodeId]: clamped };
+			localStorage.setItem(CANVAS_WIDTHS_STORAGE_KEY, JSON.stringify(next));
+			return next;
+		});
+		localStorage.setItem(CANVAS_WIDTH_STORAGE_KEY, String(clamped));
+		setNodes((current) =>
+			current.map((node) =>
+				node.id === nodeId
+					? { ...node, data: { ...node.data, width: clamped } }
+					: node
+			)
+		);
+	}, []);
 
 	useEffect(() => {
 		const depth = clampNumber(config.depth, 1, config.maxDepth);
@@ -190,20 +225,25 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 			return;
 		}
 		const maxWidth = Math.max(900, Math.floor(viewport.width - 80));
-		const clampedWidth = clampNumber(nodeWidth, 900, maxWidth);
-		const nextNodes: Node<CanvasNodeData>[] = graph.nodes.map((node: CanvasNodePayload) => ({
+		const nextNodes: Node<CanvasNodeData>[] = graph.nodes.map((node: CanvasNodePayload) => {
+			const storedWidth = nodeWidths[node.id];
+			const resolvedWidth = clampNumber(storedWidth ?? nodeWidth, 900, maxWidth);
+			const savedPosition = nodePositions[node.id];
+			return {
 			id: node.id,
 			type: 'note',
-			position: { x: 0, y: 0 },
+			position: savedPosition ? { x: savedPosition.x, y: savedPosition.y } : { x: 0, y: 0 },
 			data: {
 				title: node.title,
 				contentHtml: node.contentHtml,
-				width: clampedWidth,
+				width: resolvedWidth,
 				isRoot: node.id === graph.rootId,
+				nodeId: node.id,
 				onResize: updateNodeWidth,
 				maxWidth,
 			},
-		}));
+		};
+		});
 		const nextEdges: Edge[] = graph.edges.map((edge: CanvasEdgePayload, index: number) => ({
 			id: edge.from + '-' + edge.to + '-' + index,
 			source: edge.from,
@@ -212,10 +252,35 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 		}));
 		setNodes(nextNodes);
 		setEdges(nextEdges);
-	}, [graph, nodeWidth, viewport.width, updateNodeWidth]);
+	}, [graph, nodeWidth, viewport.width, nodeWidths, nodePositions, updateNodeWidth]);
+
+	const handleNodesChange = useCallback((changes: NodeChange[]) => {
+		setNodes((current) => applyNodeChanges(changes, current));
+		const positionChanges = changes.filter((change): change is NodeChange & { id: string; position: { x: number; y: number } } => {
+			return change.type === 'position' && 'position' in change;
+		});
+		if (positionChanges.length === 0) {
+			return;
+		}
+		setNodePositions((prev) => {
+			const next = { ...prev };
+			positionChanges.forEach((change) => {
+				if (!change.position) {
+					return;
+				}
+				next[change.id] = { x: change.position.x, y: change.position.y };
+			});
+			localStorage.setItem(CANVAS_POSITIONS_STORAGE_KEY, JSON.stringify(next));
+			return next;
+		});
+	}, []);
 
 	useEffect(() => {
 		if (!graph || nodes.length === 0) {
+			return;
+		}
+		const hasAllPositions = graph.nodes.every((node) => !!nodePositions[node.id]);
+		if (hasAllPositions) {
 			return;
 		}
 		const container = containerRef.current;
@@ -228,7 +293,7 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 		}
 		const center = { x: stageRect.width / 2, y: stageRect.height / 2 };
 		const margin = 18;
-		const baseRadius = 320;
+		const baseRadius = 420;
 		const nodeElements = container.querySelectorAll<HTMLDivElement>('.react-flow__node');
 		const sizeMap = new Map<string, { width: number; height: number }>();
 		nodeElements.forEach((element: HTMLDivElement) => {
@@ -250,7 +315,8 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 		};
 
 		const placeNode = (nodeId: string, angleRad: number, radiusStart: number, placed: Map<string, DOMRect>) => {
-			const size = sizeMap.get(nodeId) || { width: nodeWidth, height: 260 };
+			const storedWidth = nodeWidths[nodeId] ?? nodeWidth;
+			const size = sizeMap.get(nodeId) || { width: storedWidth, height: 320 };
 			let radius = radiusStart;
 			let rect: DOMRect | null = null;
 			while (true) {
@@ -290,10 +356,10 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 		});
 
 		const sectorAngles: Record<CanvasDirection, { start: number; end: number }> = {
-			parent: { start: 225, end: 315 },
-			child: { start: 45, end: 135 },
-			info: { start: 135, end: 225 },
-			knowledge: { start: 315, end: 45 },
+			parent: { start: 315, end: 45 },
+			child: { start: 135, end: 225 },
+			info: { start: 225, end: 315 },
+			knowledge: { start: 45, end: 135 },
 		};
 
 		const buildAngles = (count: number, start: number, end: number) => {
@@ -313,13 +379,10 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 		};
 
 		const placed = new Map<string, DOMRect>();
-		const rootSize = sizeMap.get(graph.rootId) || { width: nodeWidth, height: 260 };
-		const rootRect = new DOMRect(
-			center.x - rootSize.width / 2,
-			center.y - rootSize.height / 2,
-			rootSize.width,
-			rootSize.height
-		);
+		const rootWidth = nodeWidths[graph.rootId] ?? nodeWidth;
+		const rootSize = sizeMap.get(graph.rootId) || { width: rootWidth, height: 320 };
+		const rootPosition = nodePositions[graph.rootId] || { x: center.x - rootSize.width / 2, y: center.y - rootSize.height / 2 };
+		const rootRect = new DOMRect(rootPosition.x, rootPosition.y, rootSize.width, rootSize.height);
 		placed.set(graph.rootId, rootRect);
 
 		Object.entries(groups).forEach(([key, items]: [string, CanvasNodePayload[]]) => {
@@ -329,6 +392,13 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 			const sector = sectorAngles[key as CanvasDirection];
 			const angles = buildAngles(items.length, sector.start, sector.end);
 			items.forEach((node: CanvasNodePayload, index: number) => {
+				if (nodePositions[node.id]) {
+					const storedWidth = nodeWidths[node.id] ?? nodeWidth;
+					const size = sizeMap.get(node.id) || { width: storedWidth, height: 320 };
+					const existing = nodePositions[node.id];
+					placed.set(node.id, new DOMRect(existing.x, existing.y, size.width, size.height));
+					return;
+				}
 				const angleDeg = angles[index] ?? sector.start;
 				const angleRad = (angleDeg * Math.PI) / 180;
 				const rect = placeNode(node.id, angleRad, baseRadius, placed);
@@ -344,18 +414,32 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 				if (!rect) {
 					return node;
 				}
+				if (nodePositions[node.id]) {
+					return node;
+				}
 				return { ...node, position: { x: rect.x, y: rect.y } };
 			})
 		);
-	}, [graph, nodeWidth, viewport.width, viewport.height]);
+		setNodePositions((prev) => {
+			const next = { ...prev };
+			placed.forEach((rect, id) => {
+				if (!next[id]) {
+					next[id] = { x: rect.x, y: rect.y };
+				}
+			});
+			localStorage.setItem(CANVAS_POSITIONS_STORAGE_KEY, JSON.stringify(next));
+			return next;
+		});
+	}, [graph, nodeWidth, nodeWidths, nodePositions, viewport.width, viewport.height]);
 
 	return (
 		<div className="local-vault-canvas-app" ref={containerRef}>
-			<ReactFlow
-				nodes={nodes}
-				edges={edges}
-				nodeTypes={nodeTypes}
-				fitView
+		<ReactFlow
+			nodes={nodes}
+			edges={edges}
+			nodeTypes={nodeTypes}
+			onNodesChange={handleNodesChange}
+			fitView
 				panOnDrag
 				panOnScroll
 				zoomOnScroll
