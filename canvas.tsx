@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot, Root } from 'react-dom/client';
-import ReactFlow, { Background, Controls, Edge, Node, applyNodeChanges, NodeChange } from 'reactflow';
+import ReactFlow, { Background, Controls, Edge, Node, applyNodeChanges, NodeChange, useReactFlow, ReactFlowProvider } from 'reactflow';
 import reactFlowStyles from 'reactflow/dist/style.css';
 
 type CanvasDirection = 'parent' | 'child' | 'info' | 'knowledge';
@@ -118,19 +118,20 @@ const NoteNode: React.FC<{ data: CanvasNodeData }> = ({ data }: { data: CanvasNo
 	);
 };
 
-const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: CanvasConfig }) => {
-	const [graph, setGraph] = useState<CanvasGraphPayload | null>(null);
-	const [status, setStatus] = useState<string>('');
-	const [nodeWidth, setNodeWidth] = useState<number>(config.nodeWidth);
-	const [nodeWidths, setNodeWidths] = useState<Record<string, number>>({});
-	const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
-	const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
-	const [nodes, setNodes] = useState<Node<CanvasNodeData>[]>([]);
-	const [edges, setEdges] = useState<Edge[]>([]);
-	const containerRef = useRef<HTMLDivElement | null>(null);
-	const storageScope = config.path || '';
-	const widthsStorageKey = scopedStorageKey(CANVAS_WIDTHS_STORAGE_KEY, storageScope);
-	const positionsStorageKey = scopedStorageKey(CANVAS_POSITIONS_STORAGE_KEY, storageScope);
+	const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: CanvasConfig }) => {
+		const [graph, setGraph] = useState<CanvasGraphPayload | null>(null);
+		const [status, setStatus] = useState<string>('');
+		const [nodeWidth, setNodeWidth] = useState<number>(config.nodeWidth);
+		const [nodeWidths, setNodeWidths] = useState<Record<string, number>>({});
+		const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
+		const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
+		const [nodes, setNodes] = useState<Node<CanvasNodeData>[]>([]);
+		const [edges, setEdges] = useState<Edge[]>([]);
+		const containerRef = useRef<HTMLDivElement | null>(null);
+		const { fitView } = useReactFlow();
+		const storageScope = config.path || '';
+		const widthsStorageKey = scopedStorageKey(CANVAS_WIDTHS_STORAGE_KEY, storageScope);
+		const positionsStorageKey = scopedStorageKey(CANVAS_POSITIONS_STORAGE_KEY, storageScope);
 
 	useEffect(() => {
 		ensureReactFlowStyles();
@@ -235,15 +236,15 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 	const getEdgeStyle = (direction: CanvasDirection) => {
 		switch (direction) {
 			case 'parent':
-				return { stroke: '#e74c3c', strokeWidth: 2 };
+				return { stroke: '#e74c3c', strokeWidth: 3, opacity: 1 };
 			case 'child':
-				return { stroke: '#3498db', strokeWidth: 2 };
+				return { stroke: '#3498db', strokeWidth: 3, opacity: 1 };
 			case 'info':
-				return { stroke: '#2ecc71', strokeWidth: 2 };
+				return { stroke: '#2ecc71', strokeWidth: 3, opacity: 1 };
 			case 'knowledge':
-				return { stroke: '#f39c12', strokeWidth: 2 };
+				return { stroke: '#f39c12', strokeWidth: 3, opacity: 1 };
 			default:
-				return { stroke: '#999', strokeWidth: 2 };
+				return { stroke: '#666', strokeWidth: 3, opacity: 1 };
 		}
 	};
 
@@ -283,7 +284,10 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 		}));
 		setNodes(nextNodes);
 		setEdges(nextEdges);
-	}, [graph, nodeWidth, viewport.width, nodeWidths, nodePositions, updateNodeWidth]);
+		setTimeout(() => {
+			fitView({ padding: 0.2, duration: 800 });
+		}, 100);
+	}, [graph, nodeWidth, viewport.width, nodeWidths, nodePositions, updateNodeWidth, fitView]);
 
 	const handleNodesChange = useCallback((changes: NodeChange[]) => {
 		setNodes((current) => applyNodeChanges(changes, current));
@@ -474,11 +478,11 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 				type: 'smoothstep',
 				animated: false,
 				style: {
-					strokeWidth: 2,
-					stroke: '#999',
+					strokeWidth: 3,
+					stroke: '#666',
+					opacity: 1,
 				},
 			}}
-			fitView
 				panOnDrag
 				panOnScroll
 				zoomOnScroll
@@ -503,7 +507,11 @@ const renderCanvas = (container: HTMLElement, config: CanvasConfig) => {
 	if (!canvasRoot) {
 		canvasRoot = createRoot(container);
 	}
-	canvasRoot.render(<CanvasApp config={config} />);
+	canvasRoot.render(
+		<ReactFlowProvider>
+			<CanvasApp config={config} />
+		</ReactFlowProvider>
+	);
 };
 
 declare global {

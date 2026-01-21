@@ -2827,7 +2827,7 @@ export default class LocalServerPlugin extends Plugin {
 		.canvas-view { display: none; }
 		body.is-canvas .canvas-view { display: block; }
 		.canvas-root { position: fixed; inset: 0; background: var(--surface); }
-		.local-vault-canvas-app { width: 100%; height: 100%; }
+		.local-vault-canvas-app { width: 100%; height: 100%; z-index: 10; position: relative; }
 		.local-vault-canvas-app .react-flow__renderer { background: var(--surface); }
 		.local-vault-canvas-node {
 			border-radius: 16px;
@@ -2868,7 +2868,7 @@ export default class LocalServerPlugin extends Plugin {
 		.local-vault-canvas-edge-child .react-flow__edge-path { stroke: #7b9b4b; }
 		.local-vault-canvas-edge-info .react-flow__edge-path { stroke: #c97b3c; }
 		.local-vault-canvas-edge-knowledge .react-flow__edge-path { stroke: #4c8a9b; }
-		.local-vault-canvas-edge .react-flow__edge-path { stroke-width: 2; opacity: 0.85; }
+		.local-vault-canvas-edge .react-flow__edge-path { stroke-width: 3; opacity: 1; }
 		.pagebook {
 			display: grid;
 			gap: 12px;
