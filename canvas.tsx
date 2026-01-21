@@ -232,6 +232,21 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 		note: NoteNode,
 	}), []);
 
+	const getEdgeStyle = (direction: CanvasDirection) => {
+		switch (direction) {
+			case 'parent':
+				return { stroke: '#e74c3c', strokeWidth: 2 };
+			case 'child':
+				return { stroke: '#3498db', strokeWidth: 2 };
+			case 'info':
+				return { stroke: '#2ecc71', strokeWidth: 2 };
+			case 'knowledge':
+				return { stroke: '#f39c12', strokeWidth: 2 };
+			default:
+				return { stroke: '#999', strokeWidth: 2 };
+		}
+	};
+
 	useEffect(() => {
 		if (!graph) {
 			setNodes([]);
@@ -262,6 +277,8 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 			id: edge.from + '-' + edge.to + '-' + index,
 			source: edge.from,
 			target: edge.to,
+			type: 'smoothstep',
+			style: getEdgeStyle(edge.direction),
 			className: 'local-vault-canvas-edge local-vault-canvas-edge-' + edge.direction,
 		}));
 		setNodes(nextNodes);
@@ -453,6 +470,14 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 			edges={edges}
 			nodeTypes={nodeTypes}
 			onNodesChange={handleNodesChange}
+			defaultEdgeOptions={{
+				type: 'smoothstep',
+				animated: false,
+				style: {
+					strokeWidth: 2,
+					stroke: '#999',
+				},
+			}}
 			fitView
 				panOnDrag
 				panOnScroll

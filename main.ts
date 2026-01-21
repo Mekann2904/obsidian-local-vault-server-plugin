@@ -2319,31 +2319,13 @@ export default class LocalServerPlugin extends Plugin {
 			.replace(/`[^`]*`/g, '');
 		const results: Array<{ target: string; direction: CanvasDirection }> = [];
 		const lines = stripped.split(/\r?\n/);
-		const tokenRegex = /(親::|子::|情報::|知識::)|(!?\[\[[^\]]+\]\]|!?\[[^\]]+\]\([^\)]+\))/g;
+		const tokenRegex = /(親::|子::|情報::|知識::)?(!?\[\[[^\]]+\]\]|!?\[[^\]]+\]\([^\)]+\))/g;
 		for (const line of lines) {
-			let activeDirection: CanvasDirection | null = null;
 			let match: RegExpExecArray | null;
 			tokenRegex.lastIndex = 0;
 			while ((match = tokenRegex.exec(line))) {
 				const prefixText = match[1];
 				const linkText = match[2];
-				if (prefixText) {
-					switch (prefixText) {
-						case '親::':
-							activeDirection = 'parent';
-							break;
-						case '子::':
-							activeDirection = 'child';
-							break;
-						case '情報::':
-							activeDirection = 'info';
-							break;
-						case '知識::':
-							activeDirection = 'knowledge';
-							break;
-					}
-					continue;
-				}
 				if (!linkText) {
 					continue;
 				}
@@ -2351,7 +2333,11 @@ export default class LocalServerPlugin extends Plugin {
 				if (isEmbed) {
 					continue;
 				}
-				const direction = activeDirection ?? 'child';
+				const direction = (prefixText === '親::' ? 'parent' :
+				                  prefixText === '子::' ? 'child' :
+				                  prefixText === '情報::' ? 'info' :
+				                  prefixText === '知識::' ? 'knowledge' :
+				                  'child') as CanvasDirection;
 				let target = '';
 				if (linkText.startsWith('[[')) {
 					const inner = linkText.slice(2, -2);
@@ -2419,6 +2405,7 @@ export default class LocalServerPlugin extends Plugin {
 		const edges: CanvasEdge[] = [];
 		const markdownCache = new Map<string, string>();
 		const queue: Array<{ id: string; filePath: string; sourcePath: string; depth: number }> = [];
+		const edgeKeys = new Set<string>();
 
 		const loadMarkdown = async (absolutePath: string): Promise<string> => {
 			const cached = markdownCache.get(absolutePath);
@@ -2488,7 +2475,11 @@ export default class LocalServerPlugin extends Plugin {
 						queue.push({ id: targetId, filePath: targetAbsolute, sourcePath: targetRelative, depth: current.depth + 1 });
 					}
 				}
-				edges.push({ from: current.id, to: targetId, direction: link.direction });
+				const edgeKey = `${current.id}->${targetId}:${link.direction}`;
+				if (!edgeKeys.has(edgeKey)) {
+					edges.push({ from: current.id, to: targetId, direction: link.direction });
+					edgeKeys.add(edgeKey);
+				}
 			}
 		}
 
