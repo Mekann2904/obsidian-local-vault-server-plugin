@@ -11,7 +11,7 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = (process.argv[2] === "production");
 
-const context = await esbuild.context({
+const mainContext = await esbuild.context({
 	banner: {
 		js: banner,
 	},
@@ -41,9 +41,28 @@ const context = await esbuild.context({
 	minify: prod,
 });
 
+const canvasContext = await esbuild.context({
+	entryPoints: ["canvas.tsx"],
+	bundle: true,
+	format: "iife",
+	platform: "browser",
+	target: "es2018",
+	define: {
+		"process.env.NODE_ENV": prod ? '"production"' : '"development"',
+	},
+	logLevel: "info",
+	loader: {
+		".css": "text",
+	},
+	outfile: "canvas.bundle.js",
+	minify: prod,
+});
+
 if (prod) {
-	await context.rebuild();
+	await mainContext.rebuild();
+	await canvasContext.rebuild();
 	process.exit(0);
 } else {
-	await context.watch();
+	await mainContext.watch();
+	await canvasContext.watch();
 }

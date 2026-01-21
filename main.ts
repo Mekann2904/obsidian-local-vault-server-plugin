@@ -30,6 +30,9 @@ const MARKDOWN_PREVIEW_QUERY_KEY = 'preview';
 const MARKDOWN_PREVIEW_ENDPOINT = '/__markdown-preview';
 const MARKDOWN_PREVIEW_ASSET_ENDPOINT = '/__markdown-asset';
 const MARKDOWN_PREVIEW_TOKEN_TTL_MS = 2 * 60 * 1000;
+const MARKDOWN_CANVAS_ENDPOINT = '/__markdown-canvas';
+const MARKDOWN_CANVAS_BUNDLE_ENDPOINT = '/__markdown-canvas-bundle';
+const MAX_CANVAS_DEPTH = 6;
 
 /**
  * 個々のサーバー設定用インターフェース
@@ -132,6 +135,28 @@ interface IndexItem {
 	mtime: number;
 }
 
+type CanvasDirection = 'parent' | 'child' | 'info' | 'knowledge';
+
+interface CanvasNode {
+	id: string;
+	path: string;
+	title: string;
+	contentHtml: string;
+	direction: CanvasDirection | 'root';
+}
+
+interface CanvasEdge {
+	from: string;
+	to: string;
+	direction: CanvasDirection;
+}
+
+interface CanvasGraphPayload {
+	rootId: string;
+	nodes: CanvasNode[];
+	edges: CanvasEdge[];
+}
+
 
 export default class LocalServerPlugin extends Plugin {
 	settings: LocalServerPluginSettings;
@@ -149,6 +174,8 @@ export default class LocalServerPlugin extends Plugin {
 	private vaultBasePathCache: string | null = null;
 	/** 一時プレビュー用のトークン保管 */
 	private previewTokens: Map<string, { filePath: string; expiresAt: number }> = new Map();
+	/** Canvas bundle のパスをキャッシュ */
+	private canvasBundlePathCache: string | null | undefined = undefined;
 
 	// *** Error 2 & 5: Property 'statusBarItemEl' / 'logMessages' does not exist on type 'LocalServerPlugin'. ***
     // These properties ARE defined below. If the error persists, it's likely an environment issue.
@@ -350,6 +377,70 @@ export default class LocalServerPlugin extends Plugin {
 		return token;
 	}
 
+	private resolveCanvasBundlePath(): string | null {
+		if (this.canvasBundlePathCache !== undefined) {
+			return this.canvasBundlePathCache;
+		}
+		const candidates: string[] = [];
+		if (this.manifest?.dir) {
+			candidates.push(path.join(this.manifest.dir, 'canvas.bundle.js'));
+		}
+		const resolvedPluginDir = this.findPluginDirByManifestId();
+		if (resolvedPluginDir) {
+			candidates.push(path.join(resolvedPluginDir, 'canvas.bundle.js'));
+		}
+		const vaultBasePath = this.getVaultBasePath();
+		if (vaultBasePath) {
+			const configDir = this.app.vault.configDir || '.obsidian';
+			candidates.push(path.join(vaultBasePath, configDir, 'plugins', this.manifest.id, 'canvas.bundle.js'));
+		}
+		candidates.push(path.join(__dirname, 'canvas.bundle.js'));
+		candidates.push(path.join(process.cwd(), 'canvas.bundle.js'));
+		for (const bundlePath of candidates) {
+			if (!bundlePath || !fs.existsSync(bundlePath)) {
+				continue;
+			}
+			this.canvasBundlePathCache = bundlePath;
+			return bundlePath;
+		}
+		this.log('warn', 'Canvas bundle not found in plugin directories.');
+		this.canvasBundlePathCache = null;
+		return null;
+	}
+
+	private findPluginDirByManifestId(): string | null {
+		const vaultBasePath = this.getVaultBasePath();
+		if (!vaultBasePath) {
+			return null;
+		}
+		const configDir = this.app.vault.configDir || '.obsidian';
+		const pluginsRoot = path.join(vaultBasePath, configDir, 'plugins');
+		let pluginDirs: string[] = [];
+		try {
+			pluginDirs = fs.readdirSync(pluginsRoot, { withFileTypes: true })
+				.filter((entry) => entry.isDirectory())
+				.map((entry) => entry.name);
+		} catch {
+			return null;
+		}
+		for (const dirName of pluginDirs) {
+			const manifestPath = path.join(pluginsRoot, dirName, 'manifest.json');
+			if (!fs.existsSync(manifestPath)) {
+				continue;
+			}
+			try {
+				const raw = fs.readFileSync(manifestPath, 'utf8');
+				const parsed = JSON.parse(raw);
+				if (parsed?.id === this.manifest.id) {
+					return path.join(pluginsRoot, dirName);
+				}
+			} catch {
+				continue;
+			}
+		}
+		return null;
+	}
+
 	private resolvePreviewToken(token: string | null): string | null {
 		if (!token) {
 			return null;
@@ -385,6 +476,22 @@ export default class LocalServerPlugin extends Plugin {
 			return `${baseUrl}${vaultRelative}`;
 		}
 		return `${baseUrl}${MARKDOWN_PREVIEW_ASSET_ENDPOINT}?token=${token ?? ''}&path=${encodedPath}`;
+	}
+
+	private buildCanvasBundleUrl(entry: ServerEntrySettings, token: string | null, sourcePath?: string): string {
+		if (!this.resolveCanvasBundlePath()) {
+			return '';
+		}
+		const baseUrl = this.buildBaseUrl(entry);
+		const params = new URLSearchParams();
+		if (token) {
+			params.set('token', token);
+		} else if (entry.allowLocalhostNoToken && sourcePath) {
+			params.set('path', sourcePath);
+		}
+		const cacheBust = Date.now().toString();
+		params.set('ts', cacheBust);
+		return `${baseUrl}${MARKDOWN_CANVAS_BUNDLE_ENDPOINT}?${params.toString()}`;
 	}
 
 	private isExternalUrl(url: string): boolean {
@@ -1358,6 +1465,99 @@ export default class LocalServerPlugin extends Plugin {
 				return;
 			}
 
+			if (pathname === MARKDOWN_CANVAS_BUNDLE_ENDPOINT) {
+				const previewToken = searchParams?.get('token') ?? '';
+				let authorized = false;
+				if (!previewToken && entry.allowLocalhostNoToken && this.isLocalhostRequest(req)) {
+					authorized = true;
+				} else if (this.resolvePreviewToken(previewToken)) {
+					authorized = true;
+				}
+				if (!authorized) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden: Invalid or expired preview token.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				const bundlePath = this.resolveCanvasBundlePath();
+				if (!bundlePath) {
+					statusCode = 404;
+					this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				let stats: fs.Stats;
+				try {
+					stats = fs.statSync(bundlePath);
+				} catch {
+					statusCode = 404;
+					this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				this.serveFile(res, bundlePath, stats, entry.name, startTime, req.method, req.url);
+				return;
+			}
+
+			if (pathname === MARKDOWN_CANVAS_ENDPOINT) {
+				const requestedDepth = Number.parseInt(searchParams?.get('depth') ?? '', 10);
+				const depth = Number.isFinite(requestedDepth)
+					? Math.min(Math.max(requestedDepth, 1), MAX_CANVAS_DEPTH)
+					: 1;
+				const previewToken = searchParams?.get('token') ?? '';
+				let targetPath: string | null = null;
+				if (!previewToken && entry.allowLocalhostNoToken && this.isLocalhostRequest(req)) {
+					const rawPath = searchParams?.get('path') ?? '';
+					let decodedPath = '';
+					try {
+						decodedPath = decodeURIComponent(rawPath);
+					} catch {
+						statusCode = 400;
+						this.sendResponse(res, statusCode, 'Bad Request: Invalid path.', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					const vaultBasePath = this.getVaultBasePath();
+					if (!vaultBasePath) {
+						statusCode = 503;
+						this.sendResponse(res, statusCode, 'Service Unavailable', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					const normalizedVaultPath = decodedPath.replace(/^\/+/, '');
+					const absolutePath = path.join(vaultBasePath, normalizedVaultPath);
+					let resolvedPath: string;
+					try {
+						resolvedPath = fs.realpathSync(absolutePath);
+					} catch {
+						statusCode = 404;
+						this.sendResponse(res, statusCode, 'Not Found', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					if (!this.isPathInside(vaultBasePath, resolvedPath)) {
+						statusCode = 403;
+						this.sendResponse(res, statusCode, 'Forbidden', startTime, entry.name, req.method, req.url);
+						return;
+					}
+					targetPath = resolvedPath;
+				} else {
+					targetPath = this.resolvePreviewToken(previewToken);
+				}
+				if (!targetPath) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden: Invalid or expired preview token.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				const vaultBasePath = this.getVaultBasePath();
+				if (!vaultBasePath || !this.isPathInside(vaultBasePath, targetPath)) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden: File is outside vault.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				if (!this.isMarkdownFile(targetPath)) {
+					statusCode = 403;
+					this.sendResponse(res, statusCode, 'Forbidden: Not a markdown file.', startTime, entry.name, req.method, req.url);
+					return;
+				}
+				void this.serveMarkdownCanvas(res, targetPath, entry, depth, startTime, req.method, req.url, previewToken || null);
+				return;
+			}
+
 			if (entry.authToken) {
 				const authHeader = req.headers['authorization'];
 				if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -2057,6 +2257,234 @@ export default class LocalServerPlugin extends Plugin {
 		}
 	}
 
+	private async serveMarkdownCanvas(
+		res: http.ServerResponse,
+		filePath: string,
+		entry: ServerEntrySettings,
+		depth: number,
+		startTime: number,
+		method?: string,
+		url?: string,
+		previewToken?: string | null
+	): Promise<void> {
+		try {
+			const payload = await this.buildCanvasGraph(filePath, entry, depth, previewToken ?? null);
+			const requestMethod = (method ?? 'GET').toUpperCase();
+			res.setHeader('Content-Type', 'application/json; charset=utf-8');
+			res.setHeader('Cache-Control', 'no-store');
+			res.statusCode = 200;
+			if (requestMethod !== 'HEAD') {
+				res.end(JSON.stringify(payload));
+			} else {
+				res.end();
+			}
+			this.logRequest(startTime, 200, entry.name, method, url, filePath);
+		} catch (error: any) {
+			this.log('error', `Markdown canvas error for "${filePath}": ${error?.message ?? error}`, entry.name);
+			this.sendResponse(res, 500, 'Internal Server Error', startTime, entry.name, method, url, filePath);
+		}
+	}
+
+	private safeDecodeURIComponent(value: string): string {
+		try {
+			return decodeURIComponent(value);
+		} catch {
+			return value;
+		}
+	}
+
+	private extractPrefixDirection(value: string): CanvasDirection | null {
+		const tokens: Array<{ token: string; direction: CanvasDirection }> = [
+			{ token: '親::', direction: 'parent' },
+			{ token: '子::', direction: 'child' },
+			{ token: '情報::', direction: 'info' },
+			{ token: '知識::', direction: 'knowledge' },
+		];
+		let earliest: { index: number; direction: CanvasDirection } | null = null;
+		for (const entry of tokens) {
+			const index = value.indexOf(entry.token);
+			if (index === -1) {
+				continue;
+			}
+			if (!earliest || index < earliest.index) {
+				earliest = { index, direction: entry.direction };
+			}
+		}
+		return earliest ? earliest.direction : null;
+	}
+
+	private parseMarkdownLinksWithPrefixes(markdown: string): Array<{ target: string; direction: CanvasDirection }> {
+		const stripped = markdown
+			.replace(/```[\s\S]*?```/g, '')
+			.replace(/`[^`]*`/g, '');
+		const results: Array<{ target: string; direction: CanvasDirection }> = [];
+		const lines = stripped.split(/\r?\n/);
+		const linkRegex = /(!?\[\[[^\]]+\]\]|!?\[[^\]]+\]\([^\)]+\))/g;
+		for (const line of lines) {
+			linkRegex.lastIndex = 0;
+			let activeDirection: CanvasDirection | null = null;
+			let lastIndex = 0;
+			let match: RegExpExecArray | null;
+			while ((match = linkRegex.exec(line))) {
+				const linkText = match[0] ?? '';
+				const isEmbed = linkText.startsWith('!');
+				const before = line.slice(lastIndex, match.index);
+				const prefix = this.extractPrefixDirection(before);
+				if (prefix) {
+					activeDirection = prefix;
+				}
+				lastIndex = match.index + linkText.length;
+				if (isEmbed) {
+					continue;
+				}
+				const direction = activeDirection ?? 'child';
+				let target = '';
+				if (linkText.startsWith('[[')) {
+					const inner = linkText.slice(2, -2);
+					const withoutAlias = inner.split('|')[0] ?? '';
+					const withoutHeading = withoutAlias.split('#')[0] ?? '';
+					target = withoutHeading.trim();
+				} else {
+					const linkMatch = linkText.match(/^\[[^\]]*\]\(([^\)]+)\)$/);
+					if (linkMatch) {
+						const rawTarget = linkMatch[1]?.trim() ?? '';
+						const cleaned = rawTarget.split(' ')[0] ?? rawTarget;
+						const withoutHash = cleaned.split('#')[0] ?? cleaned;
+						target = withoutHash.trim();
+					}
+				}
+				if (!target) {
+					continue;
+				}
+				const decodedTarget = this.safeDecodeURIComponent(target);
+				if (this.isExternalUrl(decodedTarget)) {
+					continue;
+				}
+				results.push({ target: decodedTarget, direction });
+			}
+		}
+		return results;
+	}
+
+	private resolveCanvasLinkTarget(linkPath: string, sourcePath: string): TFile | null {
+		const resolved = this.app.metadataCache.getFirstLinkpathDest(linkPath, sourcePath);
+		return resolved instanceof TFile ? resolved : null;
+	}
+
+	private async renderMarkdownContentHtml(
+		markdown: string,
+		sourcePath: string,
+		entry: ServerEntrySettings,
+		token: string | null,
+		mathPlaceholders: Map<string, { mode: 'inline' | 'block'; content: string }>
+	): Promise<string> {
+		const container = document.createElement('div');
+		const tempComponent = new Component();
+		await MarkdownRenderer.render(this.app, markdown, container, sourcePath, tempComponent);
+		this.rewriteMarkdownPreviewAssets(container, sourcePath, entry, token);
+		this.rewriteMarkdownPreviewLinks(container, sourcePath, entry);
+		this.restoreMathPlaceholders(container, mathPlaceholders);
+		const renderedHtml = container.innerHTML;
+		tempComponent.unload();
+		return renderedHtml;
+	}
+
+	private async buildCanvasGraph(
+		filePath: string,
+		entry: ServerEntrySettings,
+		depth: number,
+		previewToken: string | null
+	): Promise<CanvasGraphPayload> {
+		const vaultBasePath = this.getVaultBasePath();
+		if (!vaultBasePath) {
+			throw new Error('Vault base path not available.');
+		}
+		const rootRelative = this.getVaultRelativePath(vaultBasePath, filePath) ?? filePath;
+		const rootId = rootRelative;
+		const nodes = new Map<string, CanvasNode>();
+		const edges: CanvasEdge[] = [];
+		const markdownCache = new Map<string, string>();
+		const queue: Array<{ id: string; filePath: string; sourcePath: string; depth: number }> = [];
+
+		const loadMarkdown = async (absolutePath: string): Promise<string> => {
+			const cached = markdownCache.get(absolutePath);
+			if (cached !== undefined) {
+				return cached;
+			}
+			const content = await fs.promises.readFile(absolutePath, 'utf8');
+			markdownCache.set(absolutePath, content);
+			return content;
+		};
+
+		const addNode = async (id: string, absolutePath: string, sourcePath: string, direction: CanvasDirection | 'root') => {
+			if (nodes.has(id)) {
+				return;
+			}
+			const markdown = await loadMarkdown(absolutePath);
+			const prepared = this.prepareMarkdownForPreview(markdown, sourcePath);
+			const contentHtml = await this.renderMarkdownContentHtml(
+				prepared.markdown,
+				sourcePath,
+				entry,
+				previewToken,
+				prepared.mathPlaceholders
+			);
+			const title = path.basename(sourcePath);
+			nodes.set(id, {
+				id,
+				path: sourcePath,
+				title,
+				contentHtml,
+				direction,
+			});
+		};
+
+		await addNode(rootId, filePath, rootRelative, 'root');
+		queue.push({ id: rootId, filePath, sourcePath: rootRelative, depth: 0 });
+
+		const expanded = new Set<string>();
+		while (queue.length > 0) {
+			const current = queue.shift();
+			if (!current) {
+				continue;
+			}
+			if (expanded.has(current.id)) {
+				continue;
+			}
+			expanded.add(current.id);
+			if (current.depth >= depth) {
+				continue;
+			}
+			const markdown = await loadMarkdown(current.filePath);
+			const links = this.parseMarkdownLinksWithPrefixes(markdown);
+			for (const link of links) {
+				const targetFile = this.resolveCanvasLinkTarget(link.target, current.sourcePath);
+				if (!targetFile) {
+					continue;
+				}
+				if (!this.isMarkdownFile(targetFile.path)) {
+					continue;
+				}
+				const targetRelative = targetFile.path;
+				const targetId = targetRelative;
+				const targetAbsolute = path.join(vaultBasePath, targetRelative);
+				if (!nodes.has(targetId)) {
+					await addNode(targetId, targetAbsolute, targetRelative, link.direction);
+					if (current.depth + 1 <= depth) {
+						queue.push({ id: targetId, filePath: targetAbsolute, sourcePath: targetRelative, depth: current.depth + 1 });
+					}
+				}
+				edges.push({ from: current.id, to: targetId, direction: link.direction });
+			}
+		}
+
+		return {
+			rootId,
+			nodes: Array.from(nodes.values()),
+			edges,
+		};
+	}
+
 	private async buildMarkdownPreviewHtml(
 		markdown: string,
 		sourcePath: string,
@@ -2083,6 +2511,7 @@ export default class LocalServerPlugin extends Plugin {
 				.replace(/'/g, '&#39;');
 
 		const title = escapeHtml(path.basename(sourcePath));
+		const canvasBundleUrl = this.buildCanvasBundleUrl(entry, token, sourcePath);
 
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -2320,6 +2749,20 @@ export default class LocalServerPlugin extends Plugin {
 			cursor: default;
 			transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 		}
+		.depth-control {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 10px;
+			border-radius: 999px;
+			border: 1px solid var(--border);
+			background: var(--surface);
+			color: var(--text-muted);
+			font-family: var(--font-sans);
+			font-size: 12px;
+			cursor: default;
+			transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+		}
 		.width-toggle:hover { border-color: var(--border-strong); color: var(--page-text); background: var(--surface-muted); }
 		.width-toggle[aria-pressed="true"] { border-color: var(--accent-border); color: var(--accent-text); background: var(--accent-bg); }
 		.width-toggle .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: var(--text-subtle); }
@@ -2327,6 +2770,9 @@ export default class LocalServerPlugin extends Plugin {
 		.font-control:hover { border-color: var(--border-strong); color: var(--page-text); background: var(--surface-muted); }
 		.font-control .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: var(--text-subtle); }
 		.font-control .unit { font-size: 11px; color: var(--text-subtle); }
+		.depth-control:hover { border-color: var(--border-strong); color: var(--page-text); background: var(--surface-muted); }
+		.depth-control .label { letter-spacing: 0.02em; text-transform: uppercase; font-size: 10px; color: var(--text-subtle); }
+		.depth-control .unit { font-size: 11px; color: var(--text-subtle); }
 		.font-input {
 			width: 56px;
 			padding: 2px 6px;
@@ -2337,6 +2783,17 @@ export default class LocalServerPlugin extends Plugin {
 			color: var(--page-text);
 			background: var(--surface);
 		}
+		.canvas-depth-input {
+			width: 46px;
+			padding: 2px 6px;
+			border-radius: 6px;
+			border: 1px solid var(--border);
+			font-size: 12px;
+			font-family: var(--font-sans);
+			color: var(--page-text);
+			background: var(--surface);
+		}
+		.canvas-depth-input:focus { outline: none; border-color: var(--accent-border); box-shadow: 0 0 0 2px var(--focus-ring); }
 		.font-input:focus { outline: none; border-color: var(--accent-border); box-shadow: 0 0 0 2px var(--focus-ring); }
 		.content {
 			background: transparent;
@@ -2355,6 +2812,58 @@ export default class LocalServerPlugin extends Plugin {
 			padding: 0;
 		}
 		.content p { margin-bottom: 1em; text-align: justify; }
+		body.is-canvas { overflow: hidden; }
+		body.is-canvas .content { display: none; }
+		body.is-canvas .page { max-width: 100%; padding: 0; }
+		body.is-canvas .header { position: fixed; top: 16px; right: 16px; left: auto; margin: 0; padding: 0; background: transparent; box-shadow: none; pointer-events: none; }
+		body.is-canvas .header-row { justify-content: flex-end; }
+		body.is-canvas .header-title { display: none; }
+		body.is-canvas .header-actions { position: static; pointer-events: auto; }
+		.canvas-view { display: none; }
+		body.is-canvas .canvas-view { display: block; }
+		.canvas-root { position: fixed; inset: 0; background: var(--surface); }
+		.local-vault-canvas-app { width: 100%; height: 100%; }
+		.local-vault-canvas-app .react-flow__renderer { background: var(--surface); }
+		.local-vault-canvas-node {
+			border-radius: 16px;
+			border: 1px solid var(--border-strong);
+			background: var(--page-bg);
+			box-shadow: var(--shadow);
+			color: var(--page-text);
+			padding: 12px 14px 16px;
+			box-sizing: border-box;
+			position: relative;
+		}
+		.local-vault-canvas-node.is-root { border-color: var(--accent-border); box-shadow: 0 8px 18px rgba(0,0,0,0.12); }
+		.local-vault-canvas-node-title {
+			font-family: var(--font-sans);
+			font-weight: 600;
+			font-size: 13px;
+			margin-bottom: 8px;
+			color: var(--accent-text);
+		}
+		.local-vault-canvas-node-body { font-size: 14px; line-height: 1.6; max-height: 70vh; overflow: auto; }
+		.local-vault-canvas-node-resize {
+			position: absolute;
+			top: 0;
+			right: -6px;
+			bottom: 0;
+			width: 12px;
+			cursor: ew-resize;
+		}
+		.local-vault-canvas-status {
+			position: fixed;
+			bottom: 20px;
+			left: 24px;
+			font-family: var(--font-sans);
+			font-size: 12px;
+			color: var(--text-muted);
+		}
+		.local-vault-canvas-edge-parent .react-flow__edge-path { stroke: #4b6cb7; }
+		.local-vault-canvas-edge-child .react-flow__edge-path { stroke: #7b9b4b; }
+		.local-vault-canvas-edge-info .react-flow__edge-path { stroke: #c97b3c; }
+		.local-vault-canvas-edge-knowledge .react-flow__edge-path { stroke: #4c8a9b; }
+		.local-vault-canvas-edge .react-flow__edge-path { stroke-width: 2; opacity: 0.85; }
 		.pagebook {
 			display: grid;
 			gap: 12px;
@@ -2631,6 +3140,7 @@ export default class LocalServerPlugin extends Plugin {
 		};
 	</script>
 	<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+	${canvasBundleUrl ? `<script src="${canvasBundleUrl}"></script>` : ''}
 </head>
 <body>
 	<div class="header-hover-zone" aria-hidden="true"></div>
@@ -2652,10 +3162,19 @@ export default class LocalServerPlugin extends Plugin {
 					</button>
 					<div class="menu-panel" id="view-options">
 						<div class="menu-title">表示設定</div>
-						<div class="menu-controls">
-							<label class="width-control" data-action="width-size" title="横幅(px)">
-								<span class="label">WIDTH</span>
-								<input class="width-input" type="number" min="480" max="2000" step="10" value="900" aria-label="横幅(px)">
+					<div class="menu-controls">
+						<button class="width-toggle" type="button" data-action="toggle-canvas" aria-pressed="false" title="キャンバス表示">
+							<span class="label">CANVAS</span>
+							<span class="value" data-canvas-value>OFF</span>
+						</button>
+						<label class="depth-control" data-action="canvas-depth" title="探索深度">
+							<span class="label">DEPTH</span>
+							<input class="canvas-depth-input" type="number" min="1" max="6" step="1" value="1" aria-label="探索深度">
+							<span class="unit">steps</span>
+						</label>
+						<label class="width-control" data-action="width-size" title="横幅(px)">
+							<span class="label">WIDTH</span>
+							<input class="width-input" type="number" min="480" max="2000" step="10" value="900" aria-label="横幅(px)">
 								<span class="unit">px</span>
 							</label>
 							<button class="width-toggle" type="button" data-action="toggle-width" aria-pressed="false" title="フル幅に切り替え">
@@ -2683,6 +3202,9 @@ export default class LocalServerPlugin extends Plugin {
 		<main class="content">
 			${renderedHtml}
 		</main>
+		<section class="canvas-view" aria-hidden="true">
+			<div class="canvas-root"></div>
+		</section>
 	</div>
 	<script>
 		(function() {
@@ -2700,6 +3222,21 @@ export default class LocalServerPlugin extends Plugin {
 			const spreadStorageKey = 'local-vault-preview-spread';
 			const spreadToggle = document.querySelector('[data-action="toggle-spread"]');
 			const spreadValue = spreadToggle ? spreadToggle.querySelector('[data-spread-value]') : null;
+			const canvasStorageKey = 'local-vault-preview-canvas';
+			const canvasDepthStorageKey = 'local-vault-canvas-depth';
+			const canvasToggle = document.querySelector('[data-action="toggle-canvas"]');
+			const canvasValue = canvasToggle ? canvasToggle.querySelector('[data-canvas-value]') : null;
+			const canvasDepthInput = document.querySelector('.canvas-depth-input');
+			const canvasView = document.querySelector('.canvas-view');
+			const canvasRoot = document.querySelector('.canvas-root');
+			const canvasConfig = {
+				endpoint: '${MARKDOWN_CANVAS_ENDPOINT}',
+				token: ${token ? `'${token}'` : 'null'},
+				path: ${JSON.stringify(sourcePath)},
+				depth: 1,
+				maxDepth: ${MAX_CANVAS_DEPTH},
+				nodeWidth: 900
+			};
 			const menuToggle = document.querySelector('[data-action="toggle-menu"]');
 			const menuPanel = document.querySelector('.menu-panel');
 			const contentEl = document.querySelector('.content');
@@ -2728,6 +3265,75 @@ export default class LocalServerPlugin extends Plugin {
 				widthToggle.setAttribute('aria-pressed', isFull ? 'true' : 'false');
 				widthValue.textContent = isFull ? 'ON' : 'OFF';
 				refreshPagebook();
+			};
+
+			const clampCanvasDepth = (value) => {
+				const numeric = Number.parseInt(value, 10);
+				if (!Number.isFinite(numeric)) {
+					return 1;
+				}
+				return Math.min(Math.max(numeric, 1), 6);
+			};
+
+			const renderCanvas = (depthValue) => {
+				if (!canvasRoot) {
+					return;
+				}
+				if (!window.__localVaultCanvasRender) {
+					canvasRoot.textContent = 'Canvas bundle is not available.';
+					return;
+				}
+				const safeDepth = clampCanvasDepth(depthValue);
+				window.__localVaultCanvasRender(canvasRoot, {
+					endpoint: canvasConfig.endpoint,
+					token: canvasConfig.token,
+					path: canvasConfig.path,
+					depth: safeDepth,
+					maxDepth: canvasConfig.maxDepth,
+					nodeWidth: canvasConfig.nodeWidth,
+				});
+			};
+
+			const updateCanvasToggle = (enabled) => {
+				if (!canvasToggle || !canvasValue) {
+					return;
+				}
+				canvasToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+				canvasValue.textContent = enabled ? 'ON' : 'OFF';
+			};
+
+			const getCanvasDepthValue = () => {
+				const stored = localStorage.getItem(canvasDepthStorageKey);
+				const initial = stored ? clampCanvasDepth(stored) : 1;
+				if (canvasDepthInput instanceof HTMLInputElement) {
+					const inputValue = clampCanvasDepth(canvasDepthInput.value || String(initial));
+					canvasDepthInput.value = String(inputValue);
+					return inputValue;
+				}
+				return initial;
+			};
+
+			const updateCanvasDepthValue = (value) => {
+				const depthValue = clampCanvasDepth(value);
+				localStorage.setItem(canvasDepthStorageKey, String(depthValue));
+				if (canvasDepthInput instanceof HTMLInputElement) {
+					canvasDepthInput.value = String(depthValue);
+				}
+				return depthValue;
+			};
+
+			const applyCanvasMode = (enabled) => {
+				document.body.classList.toggle('is-canvas', enabled);
+				updateCanvasToggle(enabled);
+				if (canvasView) {
+					canvasView.setAttribute('aria-hidden', enabled ? 'false' : 'true');
+				}
+				if (enabled) {
+					const depthValue = getCanvasDepthValue();
+					renderCanvas(depthValue);
+				} else if (canvasRoot instanceof HTMLElement) {
+					canvasRoot.innerHTML = '';
+				}
 			};
 
 			const readPxVar = (name, fallback) => {
@@ -3538,6 +4144,33 @@ export default class LocalServerPlugin extends Plugin {
 				});
 			} else {
 				applyTheme(getPreferredTheme());
+			}
+
+			if (canvasToggle) {
+				const savedCanvas = localStorage.getItem(canvasStorageKey) === 'on';
+				applyCanvasMode(savedCanvas);
+				canvasToggle.addEventListener('click', () => {
+					const nextState = !document.body.classList.contains('is-canvas');
+					localStorage.setItem(canvasStorageKey, nextState ? 'on' : 'off');
+					applyCanvasMode(nextState);
+				});
+			}
+
+			if (canvasDepthInput instanceof HTMLInputElement) {
+				const initialDepth = getCanvasDepthValue();
+				updateCanvasDepthValue(initialDepth);
+				canvasDepthInput.addEventListener('input', () => {
+					const depthValue = updateCanvasDepthValue(canvasDepthInput.value);
+					if (document.body.classList.contains('is-canvas')) {
+						renderCanvas(depthValue);
+					}
+				});
+				canvasDepthInput.addEventListener('blur', () => {
+					const depthValue = updateCanvasDepthValue(canvasDepthInput.value);
+					if (document.body.classList.contains('is-canvas')) {
+						renderCanvas(depthValue);
+					}
+				});
 			}
 
 			if (menuToggle instanceof HTMLButtonElement && menuPanel instanceof HTMLElement) {
