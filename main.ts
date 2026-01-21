@@ -2319,21 +2319,35 @@ export default class LocalServerPlugin extends Plugin {
 			.replace(/`[^`]*`/g, '');
 		const results: Array<{ target: string; direction: CanvasDirection }> = [];
 		const lines = stripped.split(/\r?\n/);
-		const linkRegex = /(!?\[\[[^\]]+\]\]|!?\[[^\]]+\]\([^\)]+\))/g;
+		const tokenRegex = /(親::|子::|情報::|知識::)|(!?\[\[[^\]]+\]\]|!?\[[^\]]+\]\([^\)]+\))/g;
 		for (const line of lines) {
-			linkRegex.lastIndex = 0;
 			let activeDirection: CanvasDirection | null = null;
-			let lastIndex = 0;
 			let match: RegExpExecArray | null;
-			while ((match = linkRegex.exec(line))) {
-				const linkText = match[0] ?? '';
-				const isEmbed = linkText.startsWith('!');
-				const before = line.slice(lastIndex, match.index);
-				const prefix = this.extractPrefixDirection(before);
-				if (prefix) {
-					activeDirection = prefix;
+			tokenRegex.lastIndex = 0;
+			while ((match = tokenRegex.exec(line))) {
+				const prefixText = match[1];
+				const linkText = match[2];
+				if (prefixText) {
+					switch (prefixText) {
+						case '親::':
+							activeDirection = 'parent';
+							break;
+						case '子::':
+							activeDirection = 'child';
+							break;
+						case '情報::':
+							activeDirection = 'info';
+							break;
+						case '知識::':
+							activeDirection = 'knowledge';
+							break;
+					}
+					continue;
 				}
-				lastIndex = match.index + linkText.length;
+				if (!linkText) {
+					continue;
+				}
+				const isEmbed = linkText.startsWith('!');
 				if (isEmbed) {
 					continue;
 				}

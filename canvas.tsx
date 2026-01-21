@@ -66,6 +66,13 @@ const clampNumber = (value: number, min: number, max: number) => {
 	return Math.min(Math.max(value, min), max);
 };
 
+const scopedStorageKey = (base: string, scope: string) => {
+	if (!scope) {
+		return base;
+	}
+	return base + ':' + encodeURIComponent(scope);
+};
+
 const buildCanvasUrl = (config: CanvasConfig) => {
 	const params = new URLSearchParams();
 	if (config.token) {
@@ -121,6 +128,9 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 	const [nodes, setNodes] = useState<Node<CanvasNodeData>[]>([]);
 	const [edges, setEdges] = useState<Edge[]>([]);
 	const containerRef = useRef<HTMLDivElement | null>(null);
+	const storageScope = config.path || '';
+	const widthsStorageKey = scopedStorageKey(CANVAS_WIDTHS_STORAGE_KEY, storageScope);
+	const positionsStorageKey = scopedStorageKey(CANVAS_POSITIONS_STORAGE_KEY, storageScope);
 
 	useEffect(() => {
 		ensureReactFlowStyles();
@@ -138,7 +148,7 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 	}, []);
 
 	useEffect(() => {
-		const storedWidths = localStorage.getItem(CANVAS_WIDTHS_STORAGE_KEY);
+		const storedWidths = localStorage.getItem(widthsStorageKey);
 		if (storedWidths) {
 			try {
 				const parsed = JSON.parse(storedWidths) as Record<string, number>;
@@ -146,8 +156,10 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 			} catch {
 				setNodeWidths({});
 			}
+		} else {
+			setNodeWidths({});
 		}
-		const storedPositions = localStorage.getItem(CANVAS_POSITIONS_STORAGE_KEY);
+		const storedPositions = localStorage.getItem(positionsStorageKey);
 		if (storedPositions) {
 			try {
 				const parsed = JSON.parse(storedPositions) as Record<string, { x: number; y: number }>;
@@ -155,8 +167,10 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 			} catch {
 				setNodePositions({});
 			}
+		} else {
+			setNodePositions({});
 		}
-	}, []);
+	}, [widthsStorageKey, positionsStorageKey]);
 
 	useEffect(() => {
 		const handleResize = () => {
@@ -172,7 +186,7 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 		setNodeWidth(clamped);
 		setNodeWidths((prev) => {
 			const next = { ...prev, [nodeId]: clamped };
-			localStorage.setItem(CANVAS_WIDTHS_STORAGE_KEY, JSON.stringify(next));
+			localStorage.setItem(widthsStorageKey, JSON.stringify(next));
 			return next;
 		});
 		localStorage.setItem(CANVAS_WIDTH_STORAGE_KEY, String(clamped));
@@ -270,10 +284,10 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 				}
 				next[change.id] = { x: change.position.x, y: change.position.y };
 			});
-			localStorage.setItem(CANVAS_POSITIONS_STORAGE_KEY, JSON.stringify(next));
+			localStorage.setItem(positionsStorageKey, JSON.stringify(next));
 			return next;
 		});
-	}, []);
+	}, [positionsStorageKey]);
 
 	useEffect(() => {
 		if (!graph || nodes.length === 0) {
@@ -427,10 +441,10 @@ const CanvasApp: React.FC<{ config: CanvasConfig }> = ({ config }: { config: Can
 					next[id] = { x: rect.x, y: rect.y };
 				}
 			});
-			localStorage.setItem(CANVAS_POSITIONS_STORAGE_KEY, JSON.stringify(next));
+			localStorage.setItem(positionsStorageKey, JSON.stringify(next));
 			return next;
 		});
-	}, [graph, nodeWidth, nodeWidths, nodePositions, viewport.width, viewport.height]);
+	}, [graph, nodeWidth, nodeWidths, nodePositions, positionsStorageKey, viewport.width, viewport.height]);
 
 	return (
 		<div className="local-vault-canvas-app" ref={containerRef}>
